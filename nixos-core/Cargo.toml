@@ -1,0 +1,29 @@
+[package]
+name                   = "nixos-core"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "Core NixOS system utilitiesy"
+
+# Multi-call binary symlinks will be created for each enabled feature
+[features]
+default             = [ "update-users-groups", "setup-etc", "init-script", "stage-1", "stage-2" ]
+init-script         = [ "dep:init-script" ]
+setup-etc           = [ "dep:setup-etc" ]
+stage-1             = [ "dep:stage1" ]
+stage-2             = [ "dep:stage2" ]
+update-users-groups = [ "dep:update-users-groups" ]
+
+[dependencies]
+init-script         = { workspace = true, optional = true }
+setup-etc           = { workspace = true, optional = true }
+stage1              = { workspace = true, optional = true }
+stage2              = { workspace = true, optional = true }
+update-users-groups = { workspace = true, optional = true }
+
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
