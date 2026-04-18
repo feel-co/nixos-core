@@ -1,0 +1,49 @@
+[workspace]
+members  = [ "crates/*", "nixos-core" ]
+resolver = "3"
+
+[workspace.package]
+edition      = "2024"
+license      = "MIT"
+repository   = "https://github.com/feel-co/nixos-core"
+rust-version = "1.94.0"
+version      = "0.1.0"
+
+[workspace.dependencies]
+# Internal components
+activation-common   = { path = "./crates/activation-common" }
+init-script         = { path = "./crates/init-script" }
+setup-etc           = { path = "./crates/setup-etc" }
+stage1              = { path = "./crates/stage1" }
+stage2              = { path = "./crates/stage2" }
+update-users-groups = { path = "./crates/update-users-groups" }
+
+anyhow     = "1.0.102"
+chrono     = "0.4.44"
+clap       = { version = "4.6.1", features = [ "derive", "env" ] }
+libc       = "0.2.185"
+log        = "0.4.29"
+nix        = { version = "0.31.2", features = [ "user", "fs", "process", "mount", "signal" ] }
+pwhash     = "1.0.0"
+rand       = "0.10.1"
+serde      = { version = "1.0.228", features = [ "derive" ] }
+serde_json = "1.0.149"
+tempfile   = "3.27.0"
+
+[workspace.lints.clippy]
+cargo      = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+nursery    = { level = "warn", priority = -1 }
+pedantic   = { level = "warn", priority = -1 }
+perf       = { level = "warn", priority = -1 }
+style      = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+# Style lints from rustc
+unused = "warn"
+
+[profile.release]
+codegen-units = 1
+lto           = true
+opt-level     = 3
+strip         = true
