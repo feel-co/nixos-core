@@ -1,0 +1,34 @@
+[package]
+name                   = "stage2"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+description            = "NixOS stage 2 initialization"
+
+[features]
+bootspec               = [ "dep:serde", "dep:serde_json" ]
+default                = [  ]
+full-nixos-init-compat = [ "bootspec", "systemd-integration" ]
+systemd-integration    = [  ]
+
+[lib]
+name = "stage2"
+path = "src/lib.rs"
+
+[dependencies]
+activation-common.workspace = true
+
+anyhow.workspace = true
+clap.workspace   = true
+libc.workspace   = true
+log.workspace    = true
+nix.workspace    = true
+
+# Bootspec deps
+serde      = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
