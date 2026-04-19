@@ -4,10 +4,7 @@ use std::{
   fs,
   os::{
     fd::{IntoRawFd, RawFd},
-    unix::{
-      fs::{chown, symlink},
-      process::CommandExt,
-    },
+    unix::{fs::chown, process::CommandExt},
   },
   path::Path,
   process::{Command, Stdio},
@@ -15,7 +12,7 @@ use std::{
 
 use activation_common::{get_mount_options, is_mounted};
 use anyhow::{Context, Result, bail};
-use log::info;
+use log::{info, warn};
 use nix::{
   mount::{MsFlags, mount},
   unistd::{Group, getpid},
@@ -24,6 +21,7 @@ use nix::{
 use crate::{
   cli::Args,
   common::{create_directories, log_message, set_permissions},
+  nixos_init_compat,
 };
 
 /// Run the bash-compatible stage 2 initialization sequence.
@@ -53,9 +51,9 @@ pub fn run(args: &Args) -> Result<()> {
       // Shell equivalent is `set -x`: dump each command to stderr. Rust has
       // no equivalent to bash xtrace, so we approximate it two ways:
       //   - Bump log level so every info!/debug! call reaches kmsg.
-      //   - Export SHELLOPTS=xtrace so any bash descendant (activation
-      //     scripts, post-boot hook, earlyMountScript /bin/sh wrappers)
-      //     picks up xtrace at startup.
+      //   - Export SHELLOPTS=xtrace so any bash descendant (activation scripts,
+      //     post-boot hook, earlyMountScript /bin/sh wrappers) picks up xtrace
+      //     at startup.
       //   - Emit a bash-style "+ argv ..." line before every subprocess we
       //     spawn from stage 2 itself. See trace_spawn().
       log::set_max_level(log::LevelFilter::Trace);
@@ -75,8 +73,7 @@ pub fn run(args: &Args) -> Result<()> {
     // remount. stage-2-init.sh does the same remount unconditionally outside
     // of containers (systemd / nspawn exports $container to mark those).
     if std::env::var_os("container").is_none() {
-      remount_root_rw(&log_dest)
-        .context("Failed to remount / rw")?;
+      remount_root_rw(&log_dest).context("Failed to remount / rw")?;
     }
 
     // Upstream `source @earlyMountScript@` path. If the caller supplied the
@@ -125,6 +122,14 @@ pub fn run(args: &Args) -> Result<()> {
     );
   }
 
+  if !verify_nixos_toplevel(&args.system_config) {
+    warn!(
+      "system config at {} has no nixos-version; skipping activation",
+      args.system_config.display()
+    );
+    return Ok(());
+  }
+
   // Capture fds 1 and 2 from here on so activation, post-boot commands, and
   // anything they spawn also land in /dev/kmsg (or /run/log) - matches the
   // `exec > >(tee ...) 2>&1` block in stage-2-init.sh:110-122. The shell
@@ -132,8 +137,7 @@ pub fn run(args: &Args) -> Result<()> {
   let saved = if in_systemd_stage1 {
     None
   } else {
-    capture_stdio(&log_dest)
-      .context("Failed to set up stdio capture")?
+    capture_stdio(&log_dest).context("Failed to set up stdio capture")?
   };
 
   run_activation_script(&args.system_config, &log_dest)
@@ -240,7 +244,11 @@ fn capture_stdio(
     log_dest.as_deref(),
     &format!(
       "stage-2-init: capturing stdio via {}",
-      if kmsg_writable { "/dev/kmsg" } else { "/run/log/stage-2-init.log" }
+      if kmsg_writable {
+        "/dev/kmsg"
+      } else {
+        "/run/log/stage-2-init.log"
+      }
     ),
   );
 
@@ -315,10 +323,10 @@ specialMount() {{
     shell_escape(&script.to_string_lossy()),
   );
 
-  trace_spawn(
-    std::ffi::OsStr::new("/bin/sh"),
-    &[std::ffi::OsStr::new("-c"), std::ffi::OsStr::new(&wrapper)],
-  );
+  trace_spawn(std::ffi::OsStr::new("/bin/sh"), &[
+    std::ffi::OsStr::new("-c"),
+    std::ffi::OsStr::new(&wrapper),
+  ]);
   let status = Command::new("/bin/sh")
     .arg("-c")
     .arg(&wrapper)
@@ -380,10 +388,7 @@ fn remount_root_rw(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
   let root = Path::new("/");
   // /proc/mounts isn't available yet in the no-stage-1 path; skip the
   // already-rw check and let the remount be idempotent.
-  log_message(
-    log_dest.as_deref(),
-    "stage-2-init: remounting / read-write",
-  );
+  log_message(log_dest.as_deref(), "stage-2-init: remounting / read-write");
   mount(
     None::<&str>,
     root,
@@ -630,8 +635,9 @@ fn create_required_directories(
 
 /// Register the host's resolv.conf with resolvconf, matching the upstream
 /// `resolvconf -m 1000 -a host </etc/resolv.conf` invocation from
-/// stage-2-init.sh. systemd-nspawn bind-mounts the host file at /etc/resolv.conf
-/// inside the container; we feed that file as resolvconf's stdin.
+/// stage-2-init.sh. systemd-nspawn bind-mounts the host file at
+/// /etc/resolv.conf inside the container; we feed that file as resolvconf's
+/// stdin.
 fn setup_resolv_conf(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
   let resolv_conf = Path::new("/etc/resolv.conf");
 
@@ -639,15 +645,12 @@ fn setup_resolv_conf(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
     return Ok(());
   }
 
-  trace_spawn(
-    std::ffi::OsStr::new("resolvconf"),
-    &[
-      std::ffi::OsStr::new("-m"),
-      std::ffi::OsStr::new("1000"),
-      std::ffi::OsStr::new("-a"),
-      std::ffi::OsStr::new("host"),
-    ],
-  );
+  trace_spawn(std::ffi::OsStr::new("resolvconf"), &[
+    std::ffi::OsStr::new("-m"),
+    std::ffi::OsStr::new("1000"),
+    std::ffi::OsStr::new("-a"),
+    std::ffi::OsStr::new("host"),
+  ]);
   let status = Command::new("resolvconf")
     .args(["-m", "1000", "-a", "host"])
     .stdin(fs::File::open(resolv_conf).with_context(|| {
@@ -724,6 +727,10 @@ fn run_activation_script(
   Ok(())
 }
 
+fn verify_nixos_toplevel(system_config: &Path) -> bool {
+  system_config.join("nixos-version").exists()
+}
+
 fn record_boot_config(
   system_config: &Path,
   log_dest: &Option<std::path::PathBuf>,
@@ -739,19 +746,14 @@ fn record_boot_config(
     ),
   );
 
-  if booted_system.exists() || booted_system.is_symlink() {
-    fs::remove_file(booted_system).with_context(|| {
-      format!("Failed to remove old {}", booted_system.display())
+  nixos_init_compat::atomic_symlink(system_config, booted_system)
+    .with_context(|| {
+      format!(
+        "Failed to create symlink: {} -> {}",
+        booted_system.display(),
+        system_config.display()
+      )
     })?;
-  }
-
-  symlink(system_config, booted_system).with_context(|| {
-    format!(
-      "Failed to create symlink: {} -> {}",
-      booted_system.display(),
-      system_config.display()
-    )
-  })?;
 
   Ok(())
 }

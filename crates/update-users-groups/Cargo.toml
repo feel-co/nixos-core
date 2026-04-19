@@ -8,12 +8,11 @@ repository.workspace   = true
 description            = "NixOS user and group management"
 
 [dependencies]
-activation-common.workspace = true
-anyhow.workspace            = true
-clap.workspace              = true
-libc.workspace              = true
-pwhash.workspace            = true
-rand.workspace              = true
-serde.workspace             = true
-serde_json.workspace        = true
-time.workspace              = true
+anyhow.workspace     = true
+clap.workspace       = true
+libc.workspace       = true
+pwhash.workspace     = true
+rand.workspace       = true
+serde.workspace      = true
+serde_json.workspace = true
+time.workspace       = true
