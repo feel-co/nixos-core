@@ -553,17 +553,18 @@ pub fn run(args: &[String]) -> Result<()> {
       let mut sp_expire = parts[7].to_string();
       let sp_flag = parts[8];
 
-      // In immutable mode, lock the account unless the spec supplies a hash.
+      // Existing shadow lines: match the Perl script exactly. In mutable mode
+      // we leave sp_pwdp alone so that passwords the user set with passwd(1)
+      // survive activation. In immutable mode we lock to "!" first, then let
+      // an explicit hash from the spec (hashedPassword / hashedPasswordFile /
+      // password) override. The Perl FIXME hints this is probably too
+      // restrictive, but matching behaviour is the goal - revisit in a
+      // dedicated change.
       if !spec.mutable_users {
         sp_pwdp = "!".to_string();
-      }
-
-      // If the spec has an explicit hash, apply it regardless of mutability.
-      // In immutable mode the account was locked above (!), but an explicit
-      // hashedPassword always overrides that lock - for both mutable and
-      // immutable users. (This matches the Perl TODO comment.)
-      if let Some(Some(hp)) = computed_passwords.get(sp_namp) {
-        sp_pwdp = hp.clone();
+        if let Some(Some(hp)) = computed_passwords.get(sp_namp) {
+          sp_pwdp = hp.clone();
+        }
       }
 
       // Apply expires field if present in the spec.

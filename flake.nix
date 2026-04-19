@@ -24,6 +24,12 @@
       default = self.packages.${system}.nixos-core;
     });
 
+    checks = forEachSystem (system: {
+      mutable-users = import ./nix/tests/mutable-users.nix self {
+        pkgs = pkgsForEach system;
+      };
+    });
+
     devShells = forEachSystem (system: {
       default = (pkgsForEach system).callPackage ./nix/shell.nix {};
     });
