@@ -109,6 +109,13 @@ pub struct Args {
   #[arg(long, env = "SH_BINARY")]
   pub sh_binary: Option<PathBuf>,
 
+  /// Trailing arguments passed unchanged to systemd on handoff. Mirrors the
+  /// `exec @systemdExecutable@ "$@"` at the end of stage-2-init.sh: kernel
+  /// parameters like `systemd.unit=rescue.target` arrive here when the
+  /// bootloader forwards argv to init.
+  #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+  pub systemd_args: Vec<String>,
+
   /// Use bootspec JSON (boot.json) for configuration instead of env vars.
   /// Requires the `bootspec` feature to be enabled at compile time.
   #[cfg(feature = "bootspec")]

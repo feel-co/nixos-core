@@ -728,8 +728,12 @@ fn run_post_boot_commands(
 }
 
 /// Hand off to systemd via execv.
-pub fn exec_systemd(systemd_path: &Path) -> ! {
-  info!("Exec-ing systemd: {}", systemd_path.display());
+pub fn exec_systemd(systemd_path: &Path, systemd_args: &[String]) -> ! {
+  info!(
+    "Exec-ing systemd: {} {:?}",
+    systemd_path.display(),
+    systemd_args
+  );
 
   if getpid().as_raw() != 1 {
     log::warn!("Not running as PID 1, but continuing anyway");
@@ -743,6 +747,7 @@ pub fn exec_systemd(systemd_path: &Path) -> ! {
     "USE_HOST_RESOLV_CONF",
     "STAGE2_PATH",
     "SYSTEMD_EXECUTABLE",
+    "EARLY_MOUNT_SCRIPT",
   ] {
     // SAFETY: single-threaded at this point; no other threads can observe the
     // environment change.
@@ -751,8 +756,9 @@ pub fn exec_systemd(systemd_path: &Path) -> ! {
     }
   }
 
-  // Exec systemd - this never returns on success
-  let err = Command::new(systemd_path).exec();
+  // Exec systemd with the trailing argv that was passed to us - matches
+  // `exec @systemdExecutable@ "$@"` in stage-2-init.sh.
+  let err = Command::new(systemd_path).args(systemd_args).exec();
 
   eprintln!(
     "FATAL: Failed to exec systemd at {}: {}",
