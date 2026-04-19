@@ -41,26 +41,17 @@ pub fn run(args: &[String]) -> Result<()> {
   let mut copied: Vec<String> = Vec::new();
   let mut created: HashSet<String> = HashSet::new();
 
-  // Open /etc/.clean in append mode for tracking new copies.
-  let mut clean_file = if cfg!(not(test)) {
-    Some(
-      OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/etc/.clean")
-        .context("Failed to open /etc/.clean for appending")?,
-    )
-  } else {
-    None
-  };
-
+  // Note: the upstream Perl script appends to /etc/.clean as it walks, then
+  // overwrites at the end. If activation crashes mid-walk the file is left
+  // with both the old entries and a partial set of new entries. We skip the
+  // appending step and only rewrite at the end via atomic_write, so the
+  // file is either the old copy or the new one - never a mix.
   apply_etc_tree(
     &etc,
     Path::new("/etc"),
     Path::new(ETC_STATIC),
     &mut copied,
     &mut created,
-    &mut clean_file,
   )?;
 
   // Step 5: Remove old copies that no longer exist in the new etc tree.
@@ -102,7 +93,6 @@ fn apply_etc_tree(
   etc_static: &Path,
   copied: &mut Vec<String>,
   created: &mut HashSet<String>,
-  clean_file: &mut Option<File>,
 ) -> Result<()> {
   // Use a manual stack to avoid recursion limits on deeply nested trees.
   let mut stack: Vec<PathBuf> = vec![etc_store.to_path_buf()];
@@ -189,11 +179,9 @@ fn apply_etc_tree(
         atomic_symlink(&link_target, &target).with_context(|| {
           format!("Failed to create direct symlink {}", target.display())
         })?;
-        // Record in copied list and .clean (symlink was successfully placed).
+        // Record in copied list; /etc/.clean gets written atomically at the
+        // end of the run rather than appended to incrementally.
         copied.push(relative_str.clone());
-        if let Some(f) = clean_file {
-          writeln!(f, "{relative_str}").ok();
-        }
       } else {
         // Numeric octal mode: copy the file with explicit uid/gid/mode.
         let mode = u32::from_str_radix(mode_str, 8).with_context(|| {
@@ -239,11 +227,9 @@ fn apply_etc_tree(
           .with_context(|| format!("Failed to chmod {}", tmp.display()))?;
         match fs::rename(&tmp, &target) {
           Ok(()) => {
-            // Record this as a copied file in both the running list and .clean.
+            // Record as a copied file; /etc/.clean is rewritten atomically
+            // once the whole walk succeeds.
             copied.push(relative_str.clone());
-            if let Some(f) = clean_file {
-              writeln!(f, "{relative_str}").ok();
-            }
           },
           Err(e) => {
             eprintln!(
