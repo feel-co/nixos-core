@@ -131,12 +131,6 @@ fn recreate_booted_system_atomically(
 ) -> anyhow::Result<()> {
   let booted_system = Path::new("/run/booted-system");
 
-  if booted_system.exists() || booted_system.is_symlink() {
-    std::fs::remove_file(booted_system).with_context(|| {
-      format!("Failed to remove old {}", booted_system.display())
-    })?;
-  }
-
   nixos_init_compat::atomic_symlink(system_config, booted_system).with_context(
     || {
       format!(
