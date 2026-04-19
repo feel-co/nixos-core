@@ -2,12 +2,15 @@
 
 use std::{
   fs,
-  os::unix::{
-    fs::{chown, symlink},
-    process::CommandExt,
+  os::{
+    fd::{IntoRawFd, RawFd},
+    unix::{
+      fs::{chown, symlink},
+      process::CommandExt,
+    },
   },
   path::Path,
-  process::Command,
+  process::{Command, Stdio},
 };
 
 use activation_common::{get_mount_options, is_mounted};
@@ -101,6 +104,17 @@ pub fn run(args: &Args) -> Result<()> {
     );
   }
 
+  // Capture fds 1 and 2 from here on so activation, post-boot commands, and
+  // anything they spawn also land in /dev/kmsg (or /run/log) - matches the
+  // `exec > >(tee ...) 2>&1` block in stage-2-init.sh:110-122. The shell
+  // skips this in the systemd-stage-1 path; we do the same.
+  let saved = if in_systemd_stage1 {
+    None
+  } else {
+    capture_stdio(&log_dest)
+      .context("Failed to set up stdio capture")?
+  };
+
   run_activation_script(&args.system_config, &log_dest)
     .context("Activation script failed")?;
 
@@ -117,7 +131,109 @@ pub fn run(args: &Args) -> Result<()> {
     "stage-2-init: activation complete, starting systemd",
   );
 
+  // Restore console fds before the exec so systemd inherits the terminal,
+  // not the tee pipe. Matches stage-2-init.sh's `exec 1>&$logOutFd` restore.
+  if let Some(saved) = saved {
+    restore_stdio(saved);
+  }
+
   Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SavedStdio {
+  stdout: RawFd,
+  stderr: RawFd,
+}
+
+/// Redirect fds 1 and 2 through a `tee`-like helper. Returns the saved
+/// originals (dup'd fds) so the caller can restore before the systemd
+/// handoff.
+fn capture_stdio(
+  log_dest: &Option<std::path::PathBuf>,
+) -> Result<Option<SavedStdio>> {
+  // SAFETY: dup, dup2, close on standard fds in a single-threaded context.
+  let saved_stdout = unsafe { libc::dup(1) };
+  let saved_stderr = unsafe { libc::dup(2) };
+  if saved_stdout < 0 || saved_stderr < 0 {
+    bail!(
+      "dup of stdout/stderr failed: {}",
+      std::io::Error::last_os_error()
+    );
+  }
+
+  let kmsg_writable = fs::OpenOptions::new()
+    .append(true)
+    .open("/dev/kmsg")
+    .is_ok();
+
+  // Keep a copy of every line on the original stdout so the console still
+  // sees output, while additionally writing each line to kmsg or log file.
+  let shell_cmd = if kmsg_writable {
+    format!(
+      "exec tee -i /proc/self/fd/{saved_stdout} | while IFS= read -r line; \
+       do if [ -n \"$line\" ]; then printf '<7>stage-2-init: %s\\n' \"$line\" \
+       > /dev/kmsg; fi; done"
+    )
+  } else {
+    format!(
+      "mkdir -p /run/log && exec tee -i /proc/self/fd/{saved_stdout} \
+       /run/log/stage-2-init.log"
+    )
+  };
+
+  let mut child = Command::new("/bin/sh")
+    .arg("-c")
+    .arg(&shell_cmd)
+    .stdin(Stdio::piped())
+    .spawn()
+    .context("Failed to spawn stdio capture helper")?;
+
+  let pipe_fd = child
+    .stdin
+    .take()
+    .ok_or_else(|| anyhow::anyhow!("capture child missing stdin"))?
+    .into_raw_fd();
+
+  // SAFETY: redirect fds 1 and 2 onto the pipe, then close the original.
+  let err = unsafe {
+    if libc::dup2(pipe_fd, 1) < 0 || libc::dup2(pipe_fd, 2) < 0 {
+      Some(std::io::Error::last_os_error())
+    } else {
+      None
+    }
+  };
+  unsafe { libc::close(pipe_fd) };
+  if let Some(e) = err {
+    bail!("dup2 onto stdio failed: {e}");
+  }
+
+  // Leak the Child handle: it must stay alive until its stdin EOFs, which
+  // happens once our fds 1 and 2 get closed (on exec or exit).
+  std::mem::forget(child);
+
+  log_message(
+    log_dest.as_deref(),
+    &format!(
+      "stage-2-init: capturing stdio via {}",
+      if kmsg_writable { "/dev/kmsg" } else { "/run/log/stage-2-init.log" }
+    ),
+  );
+
+  Ok(Some(SavedStdio {
+    stdout: saved_stdout,
+    stderr: saved_stderr,
+  }))
+}
+
+fn restore_stdio(saved: SavedStdio) {
+  // SAFETY: dup2/close on standard fds in a single-threaded context.
+  unsafe {
+    libc::dup2(saved.stdout, 1);
+    libc::dup2(saved.stderr, 2);
+    libc::close(saved.stdout);
+    libc::close(saved.stderr);
+  }
 }
 
 fn setup_logging() -> Result<Option<std::path::PathBuf>> {
