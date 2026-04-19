@@ -1059,9 +1059,13 @@ fn update_file_lines(
   update_file(path, &content, mode, is_dry)
 }
 
-/// Serialize a `HashMap` in sorted-key order. Perl used `to_json(...,
-/// {canonical => 1})` for gidMap/uidMap; mirroring that gives stable,
-/// diff-friendly /var/lib/nixos/*-map.json outputs across activations.
+/// Serialize a `HashMap` in sorted-key order on a single line. The upstream
+/// perl update-users-groups.pl calls `decode_json(read_file($uidMapFile))`
+/// without a prototype, so `read_file` runs in list context and hands perl
+/// only the first line; a pretty-printed "{\n" breaks activation on any
+/// machine that toggles between our tool and the perl script. Matching
+/// perl's `to_json(..., {canonical => 1})` single-line output keeps the
+/// cross-tool contract intact.
 fn update_file_json_map(
   path: &str,
   data: &HashMap<String, u32>,
@@ -1071,8 +1075,8 @@ fn update_file_json_map(
     return Ok(());
   }
   let sorted: std::collections::BTreeMap<&String, &u32> = data.iter().collect();
-  let content = serde_json::to_string_pretty(&sorted)
-    .context("Failed to serialize JSON")?;
+  let content =
+    serde_json::to_string(&sorted).context("Failed to serialize JSON")?;
   update_file(path, &content, 0o644, is_dry)
 }
 
