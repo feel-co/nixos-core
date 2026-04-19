@@ -758,35 +758,50 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
 
   let status = cmd.status().context("Failed to run fsck")?;
 
-  // fsck exit codes: 0 = OK, 1 = errors corrected, 2 = system should be
-  // rebooted
-  match status.code() {
-    Some(0 | 1) => Ok(true),
-    Some(2) => {
-      log_message("Filesystem errors corrected, reboot recommended", true);
-      Ok(true)
-    },
-    Some(4) => {
-      log_message("Filesystem errors left uncorrected", true);
-      Ok(false)
-    },
-    Some(8) => {
-      bail!("fsck: operational error");
-    },
-    Some(16) => {
-      bail!("fsck: usage or syntax error");
-    },
-    Some(32) => {
-      bail!("fsck: checking canceled by user request");
-    },
-    Some(128) => {
-      bail!("fsck: shared library error");
-    },
-    _ => {
-      log_message("fsck returned unknown exit code", true);
-      Ok(true) // Continue anyway
-    },
+  // fsck returns a bitmap; combined codes like 3 (1|2) and 6 (2|4) are
+  // common. stage-1-init.sh:352-366 handles this with bitwise-OR tests:
+  //   bit 1 (value 2) set  -> reboot immediately
+  //   bit 2 (value 4) set  -> unrepaired errors, fail
+  //   code >= 8            -> fsck itself failed, fail
+  //   bit 0 only (0 or 1)  -> OK / errors corrected, continue
+  let Some(code) = status.code() else {
+    // Signal death etc.; matching "code >= 8" branch.
+    bail!("fsck was terminated by a signal: {status}");
+  };
+
+  if code & 2 != 0 {
+    log_message(
+      &format!("fsck finished on {device}, rebooting..."),
+      true,
+    );
+    // Give kmsg a moment to flush, then request a reboot.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let _ = Command::new("reboot").arg("-f").status();
+    // If reboot(1) is missing or failed to take effect, fall through to a
+    // panic so the caller spawns the recovery shell instead of silently
+    // mounting a filesystem that asked for a reboot.
+    bail!("fsck requested reboot but `reboot -f` did not halt the system");
   }
+
+  if code & 4 != 0 {
+    bail!(
+      "{device} has unrepaired errors (fsck exit code {code}); fix \
+       manually",
+    );
+  }
+
+  if code >= 8 {
+    bail!("fsck on {device} failed with exit code {code}");
+  }
+
+  // code is 0 or 1 here: clean, or errors corrected and safe to mount.
+  if code == 1 {
+    log_message(
+      &format!("fsck corrected errors on {device}"),
+      true,
+    );
+  }
+  Ok(true)
 }
 
 fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
