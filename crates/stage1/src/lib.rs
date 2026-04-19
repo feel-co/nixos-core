@@ -584,17 +584,21 @@ fn settle_udev() -> Result<()> {
 fn activate_lvm() -> Result<()> {
   log_message("Activating LVM volumes...", true);
 
-  // Run vgchange to activate volume groups
-  let status = Command::new("vgchange").arg("-ay").status();
+  // extraUtils ships `lvm` (the multicall binary from lvm2) but not a
+  // standalone `vgchange`, matching stage-1.nix:122-124 which only copies
+  // dmsetup + lvm. Invoking `vgchange` directly therefore fails on the
+  // standard initrd; we must go through the multicall entry point just
+  // like `lvm vgchange -ay` in stage-1-init.sh:289.
+  let status = Command::new("lvm").args(["vgchange", "-ay"]).status();
 
-  if let Ok(status) = status {
-    if status.success() {
-      log_message("LVM volumes activated", true);
-    } else {
+  match status {
+    Ok(s) if s.success() => log_message("LVM volumes activated", true),
+    Ok(_) => {
       log_message("No LVM volumes found or activation failed", true);
-    }
-  } else {
-    log_message("vgchange not available, skipping LVM activation", true);
+    },
+    Err(_) => {
+      log_message("lvm not available, skipping LVM activation", true);
+    },
   }
 
   Ok(())
