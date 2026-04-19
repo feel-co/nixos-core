@@ -58,7 +58,9 @@ pub fn run(args: &Args) -> Result<()> {
   create_required_directories(&log_dest)
     .context("Failed to create required directories")?;
 
-  if args.use_host_resolv_conf {
+  // Match stage-2-init.sh: the useHostResolvConf branch runs only when not in
+  // the systemd-stage-1 path (initrd systemd already wires resolv.conf).
+  if args.use_host_resolv_conf && !in_systemd_stage1 {
     setup_resolv_conf(&log_dest).context("Failed to set up resolv.conf")?;
   }
 
@@ -331,61 +333,43 @@ fn create_required_directories(
   Ok(())
 }
 
+/// Register the host's resolv.conf with resolvconf, matching the upstream
+/// `resolvconf -m 1000 -a host </etc/resolv.conf` invocation from
+/// stage-2-init.sh. systemd-nspawn bind-mounts the host file at /etc/resolv.conf
+/// inside the container; we feed that file as resolvconf's stdin.
 fn setup_resolv_conf(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
   let resolv_conf = Path::new("/etc/resolv.conf");
-  let host_resolv = Path::new("/host/etc/resolv.conf");
 
-  if host_resolv.exists() {
-    // Prefer resolvconf for systemd-resolved integration; fall back to symlink.
-    if resolv_conf.exists() {
-      let status = Command::new("resolvconf")
-        .args(["-m", "1000", "-a", "host"])
-        .stdin(fs::File::open(host_resolv)?)
-        .status();
+  if !resolv_conf.exists() {
+    return Ok(());
+  }
 
-      match status {
-        Ok(s) if s.success() => {
-          log_message(
-            log_dest.as_deref(),
-            "stage-2-init: registered host resolv.conf via resolvconf",
-          );
-        },
-        _ => {
-          log_message(
-            log_dest.as_deref(),
-            "stage-2-init: warning: resolvconf failed, falling back to symlink",
-          );
-          if let Err(e) = fs::remove_file(resolv_conf) {
-            log_message(
-              log_dest.as_deref(),
-              &format!(
-                "stage-2-init: warning: failed to remove existing \
-                 resolv.conf: {e}"
-              ),
-            );
-          }
-          if let Err(e) = symlink(host_resolv, resolv_conf) {
-            log_message(
-              log_dest.as_deref(),
-              &format!(
-                "stage-2-init: warning: failed to link resolv.conf: {e}"
-              ),
-            );
-          }
-        },
-      }
-    } else {
+  let status = Command::new("resolvconf")
+    .args(["-m", "1000", "-a", "host"])
+    .stdin(fs::File::open(resolv_conf).with_context(|| {
+      format!("Failed to open {} for resolvconf", resolv_conf.display())
+    })?)
+    .status();
+
+  match status {
+    Ok(s) if s.success() => {
       log_message(
         log_dest.as_deref(),
-        "stage-2-init: linking host resolv.conf",
+        "stage-2-init: registered host resolv.conf via resolvconf",
       );
-      if let Err(e) = symlink(host_resolv, resolv_conf) {
-        log_message(
-          log_dest.as_deref(),
-          &format!("stage-2-init: warning: failed to link resolv.conf: {e}"),
-        );
-      }
-    }
+    },
+    Ok(s) => {
+      log_message(
+        log_dest.as_deref(),
+        &format!("stage-2-init: warning: resolvconf exited with {s}"),
+      );
+    },
+    Err(e) => {
+      log_message(
+        log_dest.as_deref(),
+        &format!("stage-2-init: warning: failed to invoke resolvconf: {e}"),
+      );
+    },
   }
 
   Ok(())
