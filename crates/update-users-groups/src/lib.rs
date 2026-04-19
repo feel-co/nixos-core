@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 // These are the only safe-to-call libc functions we need: getgrgid/getpwuid for
 // checking whether a candidate ID is already claimed by the OS name service.
@@ -293,13 +293,9 @@ pub fn run(args: &[String]) -> Result<()> {
     update_file_lines("/etc/group", &lines, 0o644, is_dry)?;
   }
 
-  update_file_json(GID_MAP_FILE, &gid_map, is_dry)?;
+  update_file_json_map(GID_MAP_FILE, &gid_map, is_dry)?;
 
-  if !is_dry {
-    let _ = std::process::Command::new("nscd")
-      .args(["--invalidate", "group"])
-      .spawn();
-  }
+  nscd_invalidate("group", is_dry);
 
   let mut users_cur: HashMap<String, UserEntry> = HashMap::new();
   if Path::new("/etc/passwd").exists() {
@@ -514,13 +510,9 @@ pub fn run(args: &[String]) -> Result<()> {
     update_file_lines("/etc/passwd", &lines, 0o644, is_dry)?;
   }
 
-  update_file_json(UID_MAP_FILE, &uid_map, is_dry)?;
+  update_file_json_map(UID_MAP_FILE, &uid_map, is_dry)?;
 
-  if !is_dry {
-    let _ = std::process::Command::new("nscd")
-      .args(["--invalidate", "passwd"])
-      .spawn();
-  }
+  nscd_invalidate("passwd", is_dry);
 
   let mut shadow_seen: HashSet<String> = HashSet::new();
   let mut shadow_lines: Vec<String> = Vec::new();
@@ -686,9 +678,27 @@ pub fn run(args: &[String]) -> Result<()> {
 
   update_file_lines("/etc/subuid", &sub_uids, 0o644, is_dry)?;
   update_file_lines("/etc/subgid", &sub_gids, 0o644, is_dry)?;
-  update_file_json(SUBUID_MAP_FILE, &sub_uid_map, is_dry)?;
+  update_file_json_map(SUBUID_MAP_FILE, &sub_uid_map, is_dry)?;
 
   Ok(())
+}
+
+/// Invalidate an nscd cache synchronously, matching the Perl `system("nscd",
+/// "--invalidate", $_[0])` behaviour. A fire-and-forget spawn would let
+/// activation return before the cache flush landed.
+fn nscd_invalidate(db: &str, is_dry: bool) {
+  if is_dry {
+    return;
+  }
+  match std::process::Command::new("nscd")
+    .args(["--invalidate", db])
+    .status()
+  {
+    // Non-fatal: nscd may not be running/installed on this system.
+    Ok(_) => {},
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+    Err(e) => eprintln!("warning: nscd --invalidate {db} failed: {e}"),
+  }
 }
 
 fn load_json_file<T: serde::de::DeserializeOwned>(path: &str) -> Result<T> {
@@ -976,23 +986,29 @@ fn update_file_lines(
   mode: u32,
   is_dry: bool,
 ) -> Result<()> {
+  // Always end with a newline; even an empty subuid/subgid file stays at a
+  // single "\n" to match the Perl script's `join("\n", @...) . "\n"` idiom
+  // (which produces "\n" for an empty list). POSIX line-oriented tools are
+  // happier with that than with a zero-byte file.
   let mut content = lines.join("\n");
-  if !content.is_empty() {
-    content.push('\n');
-  }
+  content.push('\n');
   update_file(path, &content, mode, is_dry)
 }
 
-fn update_file_json<T: Serialize>(
+/// Serialize a `HashMap` in sorted-key order. Perl used `to_json(..., {canonical
+/// => 1})` for gidMap/uidMap; mirroring that gives stable, diff-friendly
+/// /var/lib/nixos/*-map.json outputs across activations.
+fn update_file_json_map(
   path: &str,
-  data: &T,
+  data: &HashMap<String, u32>,
   is_dry: bool,
 ) -> Result<()> {
   if is_dry {
     return Ok(());
   }
-  let content =
-    serde_json::to_string_pretty(data).context("Failed to serialize JSON")?;
+  let sorted: std::collections::BTreeMap<&String, &u32> = data.iter().collect();
+  let content = serde_json::to_string_pretty(&sorted)
+    .context("Failed to serialize JSON")?;
   update_file(path, &content, 0o644, is_dry)
 }
 
