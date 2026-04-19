@@ -14,6 +14,11 @@
       default = self.nixosModules.nixos-core;
     };
 
+    checks = forEachSystem (system: let
+      pkgs = pkgsForEach system;
+    in
+      import ./nix/checks self {inherit pkgs;});
+
     packages = forEachSystem (system: {
       nixos-core = (pkgsForEach system).callPackage ./nix/package.nix {};
       default = self.packages.${system}.nixos-core;
