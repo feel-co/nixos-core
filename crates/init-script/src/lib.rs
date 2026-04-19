@@ -6,8 +6,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use clap::Parser;
+use time::{OffsetDateTime, macros::format_description};
 
 /// Create generic /sbin/init script
 #[derive(Parser, Debug)]
@@ -177,8 +177,13 @@ fn build_generation_suffix(path: &Path) -> Result<String> {
   // Get modification time
   let meta = symlink_metadata(path)?;
   let mtime = meta.mtime();
-  let datetime = DateTime::from_timestamp(mtime, 0).unwrap_or_else(Utc::now);
-  let formatted = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+  let dt = OffsetDateTime::from_unix_timestamp(mtime)
+    .unwrap_or_else(|_| OffsetDateTime::now_utc());
+  let formatted = dt
+    .format(format_description!(
+      "[year]-[month]-[day] [hour]:[minute]:[second]"
+    ))
+    .context("failed to format mtime")?;
   suffix.push_str(&format!(" ({formatted} - "));
 
   // Get kernel version
