@@ -1746,6 +1746,26 @@ fn switch_root(
 
   log_message(&format!("Executing init: {init}"), true);
 
+  // Upstream stage-1-init.sh exec's switch_root via `env -i` to wipe the
+  // environment before handing off to /init: the LD_LIBRARY_PATH we set to
+  // @extraUtils@/lib for initrd tools (cryptsetup, lvm, etc.) points at a
+  // stripped-down libc without libbpf/libseccomp, and letting it leak into
+  // PID 1 breaks systemd's dlopen of those features — which in turn
+  // disables seccomp sandboxing and the service-spawn PATH logic, so every
+  // unit with a relative ExecStart (systemd-tmpfiles, journalctl, bootctl,
+  // modprobe, udevadm) fails at boot with status=203/EXEC.
+  //
+  // Clear the whole environment to mirror `env -i`. /init is responsible
+  // for re-exporting its own HOME/PATH.
+  //
+  // SAFETY: single-threaded at this point; no other threads can observe
+  // the environment change.
+  unsafe {
+    for (key, _) in std::env::vars_os().collect::<Vec<_>>() {
+      std::env::remove_var(&key);
+    }
+  }
+
   let argv = [CString::new(init).context("Invalid init path")?];
 
   execv(&argv[0], &argv)
