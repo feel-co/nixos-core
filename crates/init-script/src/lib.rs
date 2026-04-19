@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use time::{OffsetDateTime, macros::format_description};
 
 /// Create generic /sbin/init script
 #[derive(Parser, Debug)]
@@ -171,20 +170,37 @@ fn parse_generation_number(name: &str) -> Option<u32> {
   }
 }
 
+// Format a Unix timestamp as "YYYY-MM-DD HH:MM:SS" UTC without pulling in a
+// date library. Howard Hinnant's civil_from_days handles negative timestamps
+// and all proleptic Gregorian dates.
+fn format_utc_datetime(ts: i64) -> String {
+  let days = ts.div_euclid(86400);
+  let tod = ts.rem_euclid(86400);
+  let (h, m, s) = (tod / 3600, (tod / 60) % 60, tod % 60);
+  let (y, mo, d) = civil_from_days(days);
+  format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02}")
+}
+
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+  let z = z + 719468;
+  let era = if z >= 0 { z } else { z - 146096 } / 146097;
+  let doe = (z - era * 146097) as u64;
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  let y = yoe as i64 + era * 400;
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  let mp = (5 * doy + 2) / 153;
+  let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+  let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+  let y = (y + i64::from(m <= 2)) as i32;
+  (y, m, d)
+}
+
 fn build_generation_suffix(path: &Path) -> Result<String> {
   let mut suffix = String::new();
 
-  // Get modification time
   let meta = symlink_metadata(path)?;
   let mtime = meta.mtime();
-  let dt = OffsetDateTime::from_unix_timestamp(mtime)
-    .unwrap_or_else(|_| OffsetDateTime::now_utc());
-  let formatted = dt
-    .format(format_description!(
-      "[year]-[month]-[day] [hour]:[minute]:[second]"
-    ))
-    .context("failed to format mtime")?;
-  suffix.push_str(&format!(" ({formatted} - "));
+  suffix.push_str(&format!(" ({} - ", format_utc_datetime(mtime)));
 
   // Get kernel version
   let kernel_path = path.join("kernel");

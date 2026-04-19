@@ -88,8 +88,8 @@ pub fn run(args: &Args) -> Result<()> {
       } else {
         log_message(
           log_dest.as_deref(),
-          "stage-2-init: warning: no --early-mount-script; only mounting \
-           the hardcoded /proc, /dev, /sys, /dev/pts, /dev/shm set. Any \
+          "stage-2-init: warning: no --early-mount-script; only mounting the \
+           hardcoded /proc, /dev, /sys, /dev/pts, /dev/shm set. Any \
            additional boot.specialFileSystems entries will be absent.",
         );
         mount_special_filesystems(&log_dest)
