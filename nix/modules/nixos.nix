@@ -298,6 +298,31 @@ in {
         };
       };
 
+      bootStage2 = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = true;
+            description = ''
+              Whether to replace {option}`system.build.bootStage2` with nixos-core's
+              `stage-2-init`.
+
+              Under a systemd initrd, nixpkgs' `initrd-nixos-activation.service`
+              calls the resulting `prepare-root` via `chroot /sysroot`.
+
+              `stage-2-init` detects `IN_NIXOS_SYSTEMD_STAGE1=true` and exits
+              after activation instead of `exec`-ing systemd.
+            '';
+          };
+
+        package = mkOption {
+          type = package;
+          default = bootStage2;
+          description = "";
+          readOnly = true;
+        };
+      };
+
       initialRamdisk = {
         enable =
           mkEnableOption ""
@@ -388,14 +413,14 @@ in {
     system = {
       build = {
         # Stage 1
-        bootStage1 = mkIf cfg.components.bootStage1 (mkForce cfg.components.bootStage1.package);
+        bootStage1 = mkIf cfg.components.bootStage1.enable (mkForce cfg.components.bootStage1.package);
 
         # Rebuild the initrd with our bootStage1 as /init. This, at the cost of risking getting
         # out of sync, mirrors the contents list from nixpkgs' stage-1.nix.
         initialRamdisk = mkIf cfg.components.initialRamdisk.enable (mkForce cfg.components.initialRamdisk.package);
 
         # Stage 2
-        bootStage2 = mkIf (!config.boot.initrd.systemd.enable) (mkForce bootStage2);
+        bootStage2 = mkIf cfg.components.bootStage2.enable (mkForce cfg.components.bootStage2.package);
 
         # Bootloader Installer
         installBootLoader = mkIf cfg.components.bootloaderInstaller.enable (mkForce cfg.components.bootloaderInstaller.package);
