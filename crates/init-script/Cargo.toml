@@ -10,4 +10,3 @@ description            = "NixOS generic init script builder"
 [dependencies]
 anyhow.workspace = true
 clap.workspace   = true
-time.workspace   = true

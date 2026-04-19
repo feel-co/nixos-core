@@ -922,23 +922,57 @@ fn alloc_sub_uid(
 }
 
 // Convert an ISO-8601 date string (YYYY-MM-DD) to days since the Unix epoch,
-// matching Perl's `int(timelocal(0,0,0,$mday,$mon-1,$year-1900)/86400)`.
+// matching Perl's `int(timelocal(0,0,0,$mday,$mon-1,$year-1900)/86400)`. Uses
+// Howard Hinnant's days_from_civil so we do not drag in a date crate for
+// proleptic Gregorian arithmetic.
 fn date_to_days(date: &str) -> Result<u64> {
-  use time::{Date, format_description, macros::date};
-
-  let format = format_description::parse("[year]-[month]-[day]")?;
-  let d = Date::parse(date, &format).with_context(|| {
-    format!("Invalid date format '{date}', expected YYYY-MM-DD")
-  })?;
-
-  let epoch = date!(1970 - 01 - 01);
-  let days = (d - epoch).whole_days();
-
+  let err = || format!("Invalid date format '{date}', expected YYYY-MM-DD");
+  let bytes = date.as_bytes();
+  if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+    return Err(anyhow::anyhow!(err()));
+  }
+  let parse = |s: &str| s.parse::<u32>().with_context(err);
+  let y = parse(&date[0..4])? as i32;
+  let m = parse(&date[5..7])?;
+  let d = parse(&date[8..10])?;
+  if !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
+    return Err(anyhow::anyhow!(err()));
+  }
+  let days = days_from_civil(y, m, d);
   if days < 0 {
     bail!("expires date '{date}' is before the Unix epoch");
   }
-
   Ok(days as u64)
+}
+
+fn is_leap(y: i32) -> bool {
+  (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+fn days_in_month(y: i32, m: u32) -> u32 {
+  match m {
+    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+    4 | 6 | 9 | 11 => 30,
+    2 => {
+      if is_leap(y) {
+        29
+      } else {
+        28
+      }
+    },
+    _ => 0,
+  }
+}
+
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+  let y = i64::from(y) - i64::from(m <= 2);
+  let era = if y >= 0 { y } else { y - 399 } / 400;
+  let yoe = (y - era * 400) as u64;
+  let m = u64::from(m);
+  let d = u64::from(d);
+  let doy = (153 * if m > 2 { m - 3 } else { m + 9 } + 2) / 5 + d - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  era * 146097 + doe as i64 - 719468
 }
 
 fn hash_password(password: &str) -> Result<String> {

@@ -14,4 +14,3 @@ libc.workspace       = true
 serde.workspace      = true
 serde_json.workspace = true
 sha-crypt.workspace  = true
-time.workspace       = true
