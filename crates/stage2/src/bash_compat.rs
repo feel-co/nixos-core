@@ -50,12 +50,23 @@ pub fn run(args: &Args) -> Result<()> {
     );
   } else {
     if has_kernel_cmdline_flag("boot.debugtrace") {
-      // Shell equivalent is `set -x`: dump each activation/post-boot command
-      // to stderr. Bump log level so every `info!`/`debug!` reaches kmsg.
+      // Shell equivalent is `set -x`: dump each command to stderr. Rust has
+      // no equivalent to bash xtrace, so we approximate it two ways:
+      //   - Bump log level so every info!/debug! call reaches kmsg.
+      //   - Export SHELLOPTS=xtrace so any bash descendant (activation
+      //     scripts, post-boot hook, earlyMountScript /bin/sh wrappers)
+      //     picks up xtrace at startup.
+      //   - Emit a bash-style "+ argv ..." line before every subprocess we
+      //     spawn from stage 2 itself. See trace_spawn().
       log::set_max_level(log::LevelFilter::Trace);
+      // SAFETY: single-threaded environment tweak before any child forks.
+      unsafe {
+        std::env::set_var("SHELLOPTS", "xtrace");
+      }
       log_message(
         log_dest.as_deref(),
-        "stage-2-init: boot.debugtrace set; tracing enabled",
+        "stage-2-init: boot.debugtrace set; xtrace + subprocess tracing \
+         enabled",
       );
     }
 
@@ -179,15 +190,18 @@ fn capture_stdio(
 
   // Keep a copy of every line on the original stdout so the console still
   // sees output, while additionally writing each line to kmsg or log file.
+  // Prefix with `set +x` so a boot.debugtrace-inherited SHELLOPTS=xtrace
+  // doesn't have the capture shell echoing "+ tee ..." back into its own
+  // pipe (harmless but noisy).
   let shell_cmd = if kmsg_writable {
     format!(
-      "exec tee -i /proc/self/fd/{saved_stdout} | while IFS= read -r line; \
-       do if [ -n \"$line\" ]; then printf '<7>stage-2-init: %s\\n' \"$line\" \
-       > /dev/kmsg; fi; done"
+      "set +x; exec tee -i /proc/self/fd/{saved_stdout} | while IFS= read -r \
+       line; do if [ -n \"$line\" ]; then printf '<7>stage-2-init: %s\\n' \
+       \"$line\" > /dev/kmsg; fi; done"
     )
   } else {
     format!(
-      "mkdir -p /run/log && exec tee -i /proc/self/fd/{saved_stdout} \
+      "set +x; mkdir -p /run/log && exec tee -i /proc/self/fd/{saved_stdout} \
        /run/log/stage-2-init.log"
     )
   };
@@ -276,9 +290,15 @@ fn run_early_mount_script(
   );
 
   // Inlines the specialMount helper that stage-2-init.sh defines before the
-  // source, so the nix-generated script can be consumed verbatim.
+  // source, so the nix-generated script can be consumed verbatim. Honour
+  // boot.debugtrace by enabling shell xtrace alongside errexit.
+  let set_flags = if log::max_level() >= log::LevelFilter::Trace {
+    "set -ex"
+  } else {
+    "set -e"
+  };
   let wrapper = format!(
-    r#"set -e
+    r#"{set_flags}
 specialMount() {{
     local device="$1"
     local mountPoint="$2"
@@ -295,6 +315,10 @@ specialMount() {{
     shell_escape(&script.to_string_lossy()),
   );
 
+  trace_spawn(
+    std::ffi::OsStr::new("/bin/sh"),
+    &[std::ffi::OsStr::new("-c"), std::ffi::OsStr::new(&wrapper)],
+  );
   let status = Command::new("/bin/sh")
     .arg("-c")
     .arg(&wrapper)
@@ -324,6 +348,22 @@ fn shell_escape(s: &str) -> String {
   }
   out.push('\'');
   out
+}
+
+/// Bash-style "+ cmd args..." trace emitted on stderr before a subprocess
+/// starts. Active whenever boot.debugtrace is on the kernel cmdline; checked
+/// each call so the behaviour follows log::max_level rather than the env.
+fn trace_spawn(program: &std::ffi::OsStr, args: &[&std::ffi::OsStr]) {
+  if log::max_level() < log::LevelFilter::Trace {
+    return;
+  }
+  let mut line = String::from("+ ");
+  line.push_str(&program.to_string_lossy());
+  for a in args {
+    line.push(' ');
+    line.push_str(&a.to_string_lossy());
+  }
+  eprintln!("{line}");
 }
 
 /// Whitespace-tokenized scan of /proc/cmdline for a bare flag. Matches the
@@ -599,6 +639,15 @@ fn setup_resolv_conf(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
     return Ok(());
   }
 
+  trace_spawn(
+    std::ffi::OsStr::new("resolvconf"),
+    &[
+      std::ffi::OsStr::new("-m"),
+      std::ffi::OsStr::new("1000"),
+      std::ffi::OsStr::new("-a"),
+      std::ffi::OsStr::new("host"),
+    ],
+  );
   let status = Command::new("resolvconf")
     .args(["-m", "1000", "-a", "host"])
     .stdin(fs::File::open(resolv_conf).with_context(|| {
@@ -654,6 +703,7 @@ fn run_activation_script(
     std::env::set_var("NIXOS_SYSTEM_CONFIG", system_config);
   }
 
+  trace_spawn(activate_script.as_os_str(), &[]);
   let status = Command::new(&activate_script).status().with_context(|| {
     format!(
       "Failed to execute activation script: {}",
@@ -728,16 +778,30 @@ fn run_post_boot_commands(
   // post-boot scripts commonly rely on bashisms. The file lives in the nix
   // store which may be noexec, and often doesn't carry the execute bit
   // (e.g. pkgs.writeText), so we must always invoke it through a shell.
-  let status = Command::new(shell)
-    .arg(commands_path)
-    .status()
-    .with_context(|| {
-      format!(
-        "Failed to execute post-boot commands: {} {}",
-        shell.display(),
-        commands_path.display()
-      )
-    })?;
+  //
+  // Propagate boot.debugtrace by prepending `-x` when tracing is on, which
+  // gives the user bash-style xtrace output for the hook contents.
+  let debugtrace = log::max_level() >= log::LevelFilter::Trace;
+  let mut cmd = Command::new(shell);
+  if debugtrace {
+    cmd.arg("-x");
+  }
+  cmd.arg(commands_path);
+  trace_spawn(
+    shell.as_os_str(),
+    &if debugtrace {
+      vec![std::ffi::OsStr::new("-x"), commands_path.as_os_str()]
+    } else {
+      vec![commands_path.as_os_str()]
+    },
+  );
+  let status = cmd.status().with_context(|| {
+    format!(
+      "Failed to execute post-boot commands: {} {}",
+      shell.display(),
+      commands_path.display()
+    )
+  })?;
 
   if !status.success() {
     log_message(
