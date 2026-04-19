@@ -1752,23 +1752,17 @@ fn parse_args(args: &[String]) -> Stage1Config {
   let mut i = 1;
   while i < args.len() {
     match args[i].as_str() {
-      "--target-root" | "-t" => {
-        if i + 1 < args.len() {
-          config.target_root = PathBuf::from(&args[i + 1]);
-          i += 1;
-        }
+      "--target-root" | "-t" if i + 1 < args.len() => {
+        config.target_root = PathBuf::from(&args[i + 1]);
+        i += 1;
       },
-      "--extra-utils" => {
-        if i + 1 < args.len() {
-          config.extra_utils = Some(PathBuf::from(&args[i + 1]));
-          i += 1;
-        }
+      "--extra-utils" if i + 1 < args.len() => {
+        config.extra_utils = Some(PathBuf::from(&args[i + 1]));
+        i += 1;
       },
-      "--distro-name" => {
-        if i + 1 < args.len() {
-          config.distro_name = args[i + 1].clone();
-          i += 1;
-        }
+      "--distro-name" if i + 1 < args.len() => {
+        config.distro_name = args[i + 1].clone();
+        i += 1;
       },
       _ => {},
     }
