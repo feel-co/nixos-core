@@ -196,7 +196,17 @@ fn log_message(msg: &str, to_kmsg: bool) {
   if to_kmsg
     && let Ok(mut file) = OpenOptions::new().write(true).open("/dev/kmsg")
   {
-    let _ = writeln!(file, "stage-1-init: {msg}");
+    // Printk priority prefix: <3>=error, <4>=warn, <6>=info.
+    // Messages prefixed with "FAIL:" or "Warning:" get their respective level;
+    // everything else is informational.
+    let level = if msg.starts_with("FAIL:") {
+      "<3>"
+    } else if msg.starts_with("Warning:") {
+      "<4>"
+    } else {
+      "<6>"
+    };
+    let _ = writeln!(file, "{level}stage-1-init: {msg}");
   }
 }
 
@@ -805,10 +815,7 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
   };
 
   if code & 2 != 0 {
-    log_message(
-      &format!("fsck finished on {device}, rebooting..."),
-      true,
-    );
+    log_message(&format!("fsck finished on {device}, rebooting..."), true);
     // Give kmsg a moment to flush, then request a reboot.
     std::thread::sleep(std::time::Duration::from_secs(3));
     let _ = Command::new("reboot").arg("-f").status();
@@ -820,8 +827,7 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
 
   if code & 4 != 0 {
     bail!(
-      "{device} has unrepaired errors (fsck exit code {code}); fix \
-       manually",
+      "{device} has unrepaired errors (fsck exit code {code}); fix manually",
     );
   }
 
@@ -831,10 +837,7 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
 
   // code is 0 or 1 here: clean, or errors corrected and safe to mount.
   if code == 1 {
-    log_message(
-      &format!("fsck corrected errors on {device}"),
-      true,
-    );
+    log_message(&format!("fsck corrected errors on {device}"), true);
   }
   Ok(true)
 }
@@ -1425,7 +1428,11 @@ fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
   // Prefer the iso file if this is a livecd boot, as the shell does; fall back
   // to stat'ing target_root itself so bind-mounted / overlay roots still work.
   let iso = target_root.join("iso");
-  let stat_target = if iso.exists() { iso } else { target_root.to_path_buf() };
+  let stat_target = if iso.exists() {
+    iso
+  } else {
+    target_root.to_path_buf()
+  };
 
   let meta = match fs::metadata(&stat_target) {
     Ok(m) => m,
@@ -1447,16 +1454,16 @@ fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
   // Shell: `if [ "$ROOT_MAJOR" -a "$ROOT_MINOR" -a "$ROOT_MAJOR" != 0 ]`.
   if major == 0 {
     log_message(
-      "Skipping /dev/root udev rule; root is not on a block device (pseudo fs?)",
+      "Skipping /dev/root udev rule; root is not on a block device (pseudo \
+       fs?)",
       true,
     );
     return Ok(());
   }
 
   let rules_dir = Path::new("/run/udev/rules.d");
-  fs::create_dir_all(rules_dir).with_context(|| {
-    format!("Failed to create {}", rules_dir.display())
-  })?;
+  fs::create_dir_all(rules_dir)
+    .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
   let rule = format!(
     "ACTION==\"add|change\", SUBSYSTEM==\"block\", ENV{{MAJOR}}==\"{major}\", \
      ENV{{MINOR}}==\"{minor}\", SYMLINK+=\"root\"\n"
@@ -1465,7 +1472,10 @@ fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
   fs::write(&path, rule)
     .with_context(|| format!("Failed to write {}", path.display()))?;
   log_message(
-    &format!("Wrote /dev/root udev rule ({major}:{minor}) to {}", path.display()),
+    &format!(
+      "Wrote /dev/root udev rule ({major}:{minor}) to {}",
+      path.display()
+    ),
     true,
   );
   Ok(())
@@ -1901,11 +1911,8 @@ pub fn run(args: &[String]) -> Result<()> {
   // LUKS-on-LVM and similar stacked setups need a hook here to cryptsetup-open
   // devices before vgchange can scan them. stage-1-init.sh:286 injects
   // `@preLVMCommands@` at exactly this point.
-  run_hook_script(
-    config.pre_lvm_commands.as_deref(),
-    "pre-LVM commands",
-  )
-  .context("Pre-LVM commands failed")?;
+  run_hook_script(config.pre_lvm_commands.as_deref(), "pre-LVM commands")
+    .context("Pre-LVM commands failed")?;
 
   activate_lvm().context("Failed to activate LVM")?;
 

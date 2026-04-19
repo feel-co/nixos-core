@@ -1,8 +1,10 @@
-use std::{env, path::Path};
+use std::{env, io::Write, path::Path};
 
 use anyhow::{Result, bail};
 
 fn main() -> Result<()> {
+  init_logger();
+
   let all_args: Vec<String> = env::args().collect();
 
   let (command, handler_args): (&str, &[String]) = {
@@ -22,6 +24,27 @@ fn main() -> Result<()> {
   };
 
   dispatch(command, handler_args)
+}
+
+fn init_logger() {
+  use log::Level;
+  let level = env::var("LOG_LEVEL")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(log::LevelFilter::Info);
+
+  env_logger::Builder::new()
+    .filter_level(level)
+    .format(|buf, record| {
+      let prefix = match record.level() {
+        Level::Error => "<3>",
+        Level::Warn => "<4>",
+        Level::Info => "<6>",
+        Level::Debug | Level::Trace => "<7>",
+      };
+      writeln!(buf, "{}{}", prefix, record.args())
+    })
+    .init();
 }
 
 fn dispatch(command: &str, args: &[String]) -> Result<()> {
