@@ -1,7 +1,7 @@
 use std::{
   collections::{HashMap, HashSet},
   fs::{self, File, Permissions},
-  io::{BufRead, BufReader, Write},
+  io::{BufRead, BufReader, Read, Write},
   os::unix::fs::{PermissionsExt, chown},
   path::Path,
 };
@@ -942,16 +942,29 @@ fn date_to_days(date: &str) -> Result<u64> {
 }
 
 fn hash_password(password: &str) -> Result<String> {
-  use rand::RngExt;
-  const CHARSET: &[u8] =
+  // SHA-512 crypt salt: 8 characters from the crypt(3) alphabet. Reading 8
+  // bytes from /dev/urandom and taking the low 6 bits gives a uniform pick
+  // over a 64-char alphabet, which matches what glibc's crypt_gensalt does.
+  // sha-crypt's `sha512_simple` would do salt generation + encoding on its
+  // own but pulls `rand`; we use the low-level `sha512_crypt_b64` helper
+  // with our own salt so the rand graph stays out.
+  const CHARSET: &[u8; 64] =
     b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  let mut rng = rand::rng();
-  let salt: String = (0..8)
-    .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+  let mut raw = [0u8; 8];
+  let mut f = File::open("/dev/urandom").context("opening /dev/urandom")?;
+  f.read_exact(&mut raw).context("reading /dev/urandom")?;
+  let salt: String = raw
+    .iter()
+    .map(|b| CHARSET[(*b as usize) & 0x3F] as char)
     .collect();
-  let settings = format!("$6${salt}$");
-  pwhash::sha512_crypt::hash_with(&*settings, password.as_bytes())
-    .map_err(|e| anyhow::anyhow!("Failed to hash password: {e:?}"))
+  let encoded = sha_crypt::sha512_crypt_b64(
+    password.as_bytes(),
+    salt.as_bytes(),
+    &sha_crypt::Sha512Params::new(sha_crypt::ROUNDS_DEFAULT)
+      .map_err(|e| anyhow::anyhow!("sha-crypt params: {e:?}"))?,
+  )
+  .map_err(|e| anyhow::anyhow!("sha-crypt hash: {e:?}"))?;
+  Ok(format!("$6${salt}${encoded}"))
 }
 
 fn dry_print(is_dry: bool, action: &str, dry_action: &str, target: &str) {

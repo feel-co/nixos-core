@@ -24,10 +24,9 @@ env_logger = "0.11.10"
 libc       = "0.2.185"
 log        = "0.4.29"
 nix        = { version = "0.31.2", features = [ "user", "fs", "process", "mount" ] }
-pwhash     = "1.0.0"
-rand       = "0.10.1"
 serde      = { version = "1.0.228", features = [ "derive" ] }
 serde_json = "1.0.149"
+sha-crypt  = { version = "0.5.0", default-features = false }
 tempfile   = "3.27.0"
 time       = { version = "0.3.47", default-features = false, features = [ "parsing", "formatting", "macros" ] }
 
