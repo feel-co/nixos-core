@@ -725,14 +725,21 @@ fn needs_fsck(fstype: &str, check_journaling: bool) -> bool {
   match fstype {
     // ext2 has no journal - always check it.
     "ext2" => true,
-    // ext3/ext4 have journaling; checking is optional.
-    "ext3" | "ext4" => check_journaling,
-    // fat/ntfs always need checking.
+    // Journaling filesystems where `fsck` works but is an expensive no-op
+    // unless checkJournalingFS is on. Matches stage-1-init.sh:340-345:
+    // userspace fsck is only invoked when the operator explicitly opts in.
+    "ext3" | "ext4" | "reiserfs" | "xfs" | "jfs" | "f2fs" => check_journaling,
+    // fat/ntfs have no journal; always check.
     "vfat" | "msdos" | "ntfs" => true,
-    // btrfs and xfs have their own dedicated check tools (btrfs check /
-    // xfs_repair); generic fsck does not support them and must not be run
-    // on them.
-    "btrfs" | "xfs" => false,
+    // Self-healing / kernel-side-checked filesystems that generic fsck must
+    // never touch (line 309).
+    "btrfs" | "zfs" | "bcachefs" => false,
+    // Skipped explicitly upstream for various reasons (read-only, no fsck
+    // tool, experimental). Listed so reviewers see parity with the shell
+    // even though the default arm below would catch them.
+    "iso9660" | "udf" | "apfs" | "nilfs2" | "squashfs" | "erofs" => false,
+    // Anything we don't know about: don't invoke fsck. Matches the shell's
+    // `auto`-fallthrough behaviour at line 324.
     _ => false,
   }
 }
