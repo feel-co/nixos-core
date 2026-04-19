@@ -165,8 +165,10 @@ pub fn systemctl_switch_root(sysroot: &str, init: Option<&Path>) -> Result<()> {
     info!("Using init {}.", init.display());
     cmd.arg(init);
   } else {
+    // Passing `""` is NOT equivalent to omitting the INIT arg:
+    // `systemctl switch-root ROOT ""` tells systemd "exec this literal empty
+    // path" and fails. Omitting the arg makes systemd auto-detect.
     info!("Using built-in systemd as init.");
-    cmd.arg("");
   }
 
   let output = cmd.output().context(
