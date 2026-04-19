@@ -924,15 +924,20 @@ fn alloc_sub_uid(
 // Convert an ISO-8601 date string (YYYY-MM-DD) to days since the Unix epoch,
 // matching Perl's `int(timelocal(0,0,0,$mday,$mon-1,$year-1900)/86400)`.
 fn date_to_days(date: &str) -> Result<u64> {
-  use chrono::NaiveDate;
-  let d = NaiveDate::parse_from_str(date, "%Y-%m-%d").with_context(|| {
+  use time::{Date, format_description, macros::date};
+
+  let format = format_description::parse("[year]-[month]-[day]")?;
+  let d = Date::parse(date, &format).with_context(|| {
     format!("Invalid date format '{date}', expected YYYY-MM-DD")
   })?;
-  let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
-  let days = d.signed_duration_since(epoch).num_days();
+
+  let epoch = date!(1970 - 01 - 01);
+  let days = (d - epoch).whole_days();
+
   if days < 0 {
     bail!("expires date '{date}' is before the Unix epoch");
   }
+
   Ok(days as u64)
 }
 
@@ -995,9 +1000,9 @@ fn update_file_lines(
   update_file(path, &content, mode, is_dry)
 }
 
-/// Serialize a `HashMap` in sorted-key order. Perl used `to_json(..., {canonical
-/// => 1})` for gidMap/uidMap; mirroring that gives stable, diff-friendly
-/// /var/lib/nixos/*-map.json outputs across activations.
+/// Serialize a `HashMap` in sorted-key order. Perl used `to_json(...,
+/// {canonical => 1})` for gidMap/uidMap; mirroring that gives stable,
+/// diff-friendly /var/lib/nixos/*-map.json outputs across activations.
 fn update_file_json_map(
   path: &str,
   data: &HashMap<String, u32>,
@@ -1198,12 +1203,17 @@ mod tests {
     assert_eq!(date_to_days("1970-01-02").unwrap(), 1);
     // 2000-01-01 = 10957 days after epoch
     assert_eq!(date_to_days("2000-01-01").unwrap(), 10957);
-  }
-
-  #[test]
-  fn test_date_to_days_invalid() {
+    // 1970-01-02 should be exactly 1 day after epoch
+    assert_eq!(date_to_days("1970-01-02").unwrap(), 1);
+    // A known leap year date
+    assert!(date_to_days("2024-02-29").is_ok());
+    // Invalid formats
+    assert!(date_to_days("01-01-1970").is_err());
+    assert!(date_to_days("1970-13-01").is_err());
     assert!(date_to_days("not-a-date").is_err());
-    assert!(date_to_days("1969-12-31").is_err());
+    // Before epoch
+    let result = date_to_days("1969-12-31");
+    assert!(result.is_err());
   }
 
   #[test]
@@ -1234,7 +1244,6 @@ mod tests {
     // Verify the content that would be written has correct structure.
     // We test through update_file_lines by checking update_file receives
     // the correct content (indirectly, by testing on /tmp in a real write).
-    use std::fs;
     let path = "/tmp/test_nixos_core_lines";
     update_file_lines(path, &["a".to_string(), "b".to_string()], 0o644, false)
       .unwrap();
