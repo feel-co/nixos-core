@@ -312,12 +312,20 @@ fn apply_nix_store_mount_opts(
     ),
   );
 
-  // Bind mount the store onto itself, then remount with options
+  // Bind mount the store onto itself, then remount with options. In a
+  // container /nix/store can have submounts (e.g. nix-daemon bind mounts,
+  // per-profile binds) whose propagation must be preserved, so use rbind
+  // there - matching stage-2-init.sh:93-97.
+  let bind_flags = if std::env::var_os("container").is_some() {
+    MsFlags::MS_BIND | MsFlags::MS_REC
+  } else {
+    MsFlags::MS_BIND
+  };
   mount(
     Some(store_path),
     store_path,
     None::<&str>,
-    MsFlags::MS_BIND,
+    bind_flags,
     None::<&str>,
   )
   .with_context(|| format!("Failed to bind mount {}", store_path.display()))?;
