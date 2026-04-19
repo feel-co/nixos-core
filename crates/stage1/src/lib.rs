@@ -1013,7 +1013,11 @@ fn mount_root(
         break;
       }
 
-      // Periodically re-trigger block events so udev populates by-* symlinks.
+      // Periodically re-trigger block events so udev populates by-* symlinks,
+      // and re-run `vgchange -ay` to activate LVM volumes that showed up
+      // after the initial device setup (stacked LVM / late-arriving USB /
+      // slow PVs). stage-1-init.sh does the lvm retry inline in the same
+      // loop (lines 87-120).
       if last_retrigger.elapsed() >= Duration::from_secs(3) {
         let _ = Command::new("udevadm")
           .args(["trigger", "--subsystem-match=block", "--action=change"])
@@ -1021,6 +1025,19 @@ fn mount_root(
         let _ = Command::new("udevadm")
           .args(["settle", "--timeout=3"])
           .status();
+        if Command::new("lvm")
+          .arg("--version")
+          .stdout(std::process::Stdio::null())
+          .stderr(std::process::Stdio::null())
+          .status()
+          .is_ok_and(|s| s.success())
+        {
+          let _ = Command::new("lvm")
+            .args(["vgchange", "-ay"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        }
         last_retrigger = Instant::now();
       }
 
