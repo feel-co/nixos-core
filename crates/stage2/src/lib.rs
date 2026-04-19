@@ -3,7 +3,6 @@
 //! This library provides bash-compatible stage 2 initialization with opt-in
 //! improvements borrowed from nixos-init. It is designed to be called from
 //! the nixos-core multicall binary.
-
 use std::path::Path;
 
 use anyhow::Context;
@@ -96,7 +95,20 @@ fn run_and_handoff_inner(args: &cli::Args) -> ! {
     std::process::exit(1);
   }
 
-  log::info!("stage-2-init: activation complete, starting systemd");
+  log::info!("stage-2-init: activation complete");
+
+  // When called as prepare-root from the systemd initrd
+  // (IN_NIXOS_SYSTEMD_STAGE1), we must exit cleanly. Systemd's
+  // initrd-switch-root service handles the switch-root and the systemd exec.
+  // Exec-ing systemd from within the chroot would be wrong.
+  if std::env::var("IN_NIXOS_SYSTEMD_STAGE1").unwrap_or_default() == "true" {
+    log::info!(
+      "stage-2-init: systemd initrd path; returning to initrd-switch-root"
+    );
+    std::process::exit(0);
+  }
+
+  log::info!("stage-2-init: starting systemd");
 
   if args.use_systemctl_handoff() {
     #[cfg(feature = "systemd-integration")]
