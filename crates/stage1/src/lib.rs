@@ -29,6 +29,7 @@ struct Stage1Config {
   fs_info:              Option<PathBuf>,
   pre_fail_commands:    Option<PathBuf>,
   pre_device_commands:  Option<PathBuf>,
+  pre_lvm_commands:     Option<PathBuf>,
   post_device_commands: Option<PathBuf>,
   post_resume_commands: Option<PathBuf>,
   post_mount_commands:  Option<PathBuf>,
@@ -154,6 +155,7 @@ impl Stage1Config {
       pre_device_commands:  env::var("preDeviceCommands")
         .ok()
         .map(PathBuf::from),
+      pre_lvm_commands:     env::var("preLVMCommands").ok().map(PathBuf::from),
       post_device_commands: env::var("postDeviceCommands")
         .ok()
         .map(PathBuf::from),
@@ -1881,6 +1883,16 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to start udev")?;
   trigger_udev().context("Failed to trigger udev events")?;
   settle_udev().context("Failed to settle udev")?;
+
+  // LUKS-on-LVM and similar stacked setups need a hook here to cryptsetup-open
+  // devices before vgchange can scan them. stage-1-init.sh:286 injects
+  // `@preLVMCommands@` at exactly this point.
+  run_hook_script(
+    config.pre_lvm_commands.as_deref(),
+    "pre-LVM commands",
+  )
+  .context("Pre-LVM commands failed")?;
+
   activate_lvm().context("Failed to activate LVM")?;
 
   run_hook_script(
