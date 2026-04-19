@@ -1385,6 +1385,59 @@ fn copy_initrd_secrets(target_root: &Path) -> Result<()> {
   Ok(())
 }
 
+/// Emit a udev rule mapping the real root device to /dev/root so systemd's
+/// mount-unit generator can find it. Matches stage-1-init.sh:615-624, which
+/// does the equivalent via `udevadm info --device-id-of-file`.
+fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
+  // Prefer the iso file if this is a livecd boot, as the shell does; fall back
+  // to stat'ing target_root itself so bind-mounted / overlay roots still work.
+  let iso = target_root.join("iso");
+  let stat_target = if iso.exists() { iso } else { target_root.to_path_buf() };
+
+  let meta = match fs::metadata(&stat_target) {
+    Ok(m) => m,
+    Err(e) => {
+      log_message(
+        &format!(
+          "Skipping /dev/root udev rule; stat({}) failed: {e}",
+          stat_target.display()
+        ),
+        true,
+      );
+      return Ok(());
+    },
+  };
+
+  let dev = meta.dev();
+  let (major, minor) = (libc::major(dev), libc::minor(dev));
+
+  // Shell: `if [ "$ROOT_MAJOR" -a "$ROOT_MINOR" -a "$ROOT_MAJOR" != 0 ]`.
+  if major == 0 {
+    log_message(
+      "Skipping /dev/root udev rule; root is not on a block device (pseudo fs?)",
+      true,
+    );
+    return Ok(());
+  }
+
+  let rules_dir = Path::new("/run/udev/rules.d");
+  fs::create_dir_all(rules_dir).with_context(|| {
+    format!("Failed to create {}", rules_dir.display())
+  })?;
+  let rule = format!(
+    "ACTION==\"add|change\", SUBSYSTEM==\"block\", ENV{{MAJOR}}==\"{major}\", \
+     ENV{{MINOR}}==\"{minor}\", SYMLINK+=\"root\"\n"
+  );
+  let path = rules_dir.join("61-dev-root-link.rules");
+  fs::write(&path, rule)
+    .with_context(|| format!("Failed to write {}", path.display()))?;
+  log_message(
+    &format!("Wrote /dev/root udev rule ({major}:{minor}) to {}", path.display()),
+    true,
+  );
+  Ok(())
+}
+
 fn kill_remaining_processes() -> Result<()> {
   log_message("Killing remaining processes...", true);
 
@@ -1917,6 +1970,9 @@ pub fn run(args: &[String]) -> Result<()> {
 
   run_hook_script(config.post_mount_commands.as_deref(), "post-mount commands")
     .context("Post-mount commands failed")?;
+
+  write_dev_root_udev_rule(&config.target_root)
+    .context("Failed to emit /dev/root udev rule")?;
 
   copy_iso_to_ram(&cmdline, &config.target_root)
     .context("Failed to copy ISO to RAM")?;
