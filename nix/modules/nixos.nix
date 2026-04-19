@@ -112,6 +112,7 @@ self: {
   # Hook scripts: stage1 expects file paths, not inline text.
   preFailCommandsFile = pkgs.writeText "pre-fail-commands" config.boot.initrd.preFailCommands;
   preDeviceCommandsFile = pkgs.writeText "pre-device-commands" config.boot.initrd.preDeviceCommands;
+  preLVMCommandsFile = pkgs.writeText "pre-lvm-commands" config.boot.initrd.preLVMCommands;
   postDeviceCommandsFile = pkgs.writeText "post-device-commands" config.boot.initrd.postDeviceCommands;
   postResumeCommandsFile = pkgs.writeText "post-resume-commands" config.boot.initrd.postResumeCommands;
   postMountCommandsFile = pkgs.writeText "post-mount-commands" config.boot.initrd.postMountCommands;
@@ -142,6 +143,7 @@ self: {
       export distroName=${lib.escapeShellArg config.system.nixos.distroName}
       export preFailCommands=${preFailCommandsFile}
       export preDeviceCommands=${preDeviceCommandsFile}
+      export preLVMCommands=${preLVMCommandsFile}
       export postDeviceCommands=${postDeviceCommandsFile}
       export postResumeCommands=${postResumeCommandsFile}
       export postMountCommands=${postMountCommandsFile}
@@ -165,6 +167,8 @@ self: {
       export SYSTEMD_EXECUTABLE=${lib.escapeShellArg config.boot.systemdExecutable}
       export STAGE2_PATH=${lib.escapeShellArg (lib.makeBinPath ([pkgs.coreutils pkgs.util-linux] ++ lib.optional useHostResolvConf pkgs.openresolv))}
       export POST_BOOT_COMMANDS=${postBootCommandsFile}
+      export POST_BOOT_SHELL=${pkgs.bash}/bin/bash
+      export EARLY_MOUNT_SCRIPT=${config.system.build.earlyMountScript}
       export USE_HOST_RESOLV_CONF=${
         if useHostResolvConf
         then "true"
@@ -400,10 +404,15 @@ in {
         etcActivationCommands = mkIf cfg.components.etcActivation.enable (mkForce cfg.components.etcActivation.script);
       };
 
-      activationScripts.users = mkIf cfg.components.userGroupsActivation.enable (mkForce {
-        supportsDryActivation = true;
-        text = cfg.components.userGroupsActivation.script;
-      });
+      # Only force the `text`, not the whole record. Other modules (notably
+      # agenix, which injects `users.deps = [ "agenixInstall" ]`) merge their
+      # own attributes into this script; replacing the record wholesale with
+      # mkForce nukes those contributions and lands agenixChown before
+      # agenixNewGeneration, so $_agenix_generation is empty when chown runs.
+      activationScripts.users = mkIf cfg.components.userGroupsActivation.enable {
+        supportsDryActivation = lib.mkDefault true;
+        text = mkForce cfg.components.userGroupsActivation.script;
+      };
     };
   };
 }

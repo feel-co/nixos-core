@@ -39,6 +39,22 @@ pub struct Args {
   #[arg(long, env = "POST_BOOT_COMMANDS")]
   pub post_boot_commands: Option<PathBuf>,
 
+  /// Shell used to invoke --post-boot-commands. The upstream script hard-
+  /// wires this to bash via `@shell@ @postBootCommands@`; the Nix module
+  /// should point this at the same binary so bash-isms in the user's hook
+  /// keep working. Defaults to /bin/sh which may be dash on minimal systems.
+  #[arg(long, env = "POST_BOOT_SHELL", default_value = "/bin/sh")]
+  pub post_boot_shell: PathBuf,
+
+  /// Path to the nix-generated early mount script (equivalent to
+  /// `@earlyMountScript@` in stage-2-init.sh). When set, this file is sourced
+  /// with a `specialMount` shell helper in scope, so it can set up any
+  /// special-filesystem entry declared in `boot.specialFileSystems`. When
+  /// unset, stage 2 falls back to a small hardcoded set covering /proc, /dev,
+  /// /sys, /dev/pts, /dev/shm.
+  #[arg(long, env = "EARLY_MOUNT_SCRIPT")]
+  pub early_mount_script: Option<PathBuf>,
+
   /// Use host resolv.conf
   #[arg(long, env = "USE_HOST_RESOLV_CONF")]
   pub use_host_resolv_conf: bool,
@@ -99,6 +115,13 @@ pub struct Args {
   /// Path to the /bin/sh target for --setup-fhs
   #[arg(long, env = "SH_BINARY")]
   pub sh_binary: Option<PathBuf>,
+
+  /// Trailing arguments passed unchanged to systemd on handoff. Mirrors the
+  /// `exec @systemdExecutable@ "$@"` at the end of stage-2-init.sh: kernel
+  /// parameters like `systemd.unit=rescue.target` arrive here when the
+  /// bootloader forwards argv to init.
+  #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+  pub systemd_args: Vec<String>,
 
   /// Use bootspec JSON (boot.json) for configuration instead of env vars.
   /// Requires the `bootspec` feature to be enabled at compile time.

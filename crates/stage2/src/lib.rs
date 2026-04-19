@@ -107,7 +107,7 @@ fn run_and_handoff_inner(args: &cli::Args) -> ! {
           "systemctl switch-root failed ({}), falling back to raw exec",
           e
         );
-        bash_compat::exec_systemd(&args.systemd_executable);
+        bash_compat::exec_systemd(&args.systemd_executable, &args.systemd_args);
       }
       log::error!("systemctl switch-root returned unexpectedly");
       std::process::exit(1);
@@ -119,10 +119,10 @@ fn run_and_handoff_inner(args: &cli::Args) -> ! {
         "--use-systemctl-handoff requires the systemd-integration feature. \
          Falling back to raw exec."
       );
-      bash_compat::exec_systemd(&args.systemd_executable);
+      bash_compat::exec_systemd(&args.systemd_executable, &args.systemd_args);
     }
   } else {
-    bash_compat::exec_systemd(&args.systemd_executable);
+    bash_compat::exec_systemd(&args.systemd_executable, &args.systemd_args);
   }
 }
 

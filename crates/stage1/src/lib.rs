@@ -29,6 +29,7 @@ struct Stage1Config {
   fs_info:              Option<PathBuf>,
   pre_fail_commands:    Option<PathBuf>,
   pre_device_commands:  Option<PathBuf>,
+  pre_lvm_commands:     Option<PathBuf>,
   post_device_commands: Option<PathBuf>,
   post_resume_commands: Option<PathBuf>,
   post_mount_commands:  Option<PathBuf>,
@@ -47,6 +48,8 @@ struct KernelCmdline {
   console:       Vec<String>,
   shell_on_fail: bool,
   debug1:        bool,
+  debug1devices: bool,
+  debug1mounts:  bool,
   debug:         bool,
   trace:         bool,
   panic_on_fail: bool,
@@ -93,6 +96,14 @@ impl KernelCmdline {
         },
         "boot.debug1" => {
           cmdline.debug1 =
+            value.as_ref().is_none_or(|v| v != "0" && v != "false");
+        },
+        "boot.debug1devices" => {
+          cmdline.debug1devices =
+            value.as_ref().is_none_or(|v| v != "0" && v != "false");
+        },
+        "boot.debug1mounts" => {
+          cmdline.debug1mounts =
             value.as_ref().is_none_or(|v| v != "0" && v != "false");
         },
         "boot.debug" => {
@@ -154,6 +165,7 @@ impl Stage1Config {
       pre_device_commands:  env::var("preDeviceCommands")
         .ok()
         .map(PathBuf::from),
+      pre_lvm_commands:     env::var("preLVMCommands").ok().map(PathBuf::from),
       post_device_commands: env::var("postDeviceCommands")
         .ok()
         .map(PathBuf::from),
@@ -199,6 +211,18 @@ fn setup_environment(extra_utils: Option<&Path>) -> Result<()> {
   // environment change.
   unsafe {
     env::set_var("PATH", &path);
+  }
+
+  // Export LD_LIBRARY_PATH so extraUtils binaries find their bundled libs.
+  // Matches stage-1-init.sh:14, `export LD_LIBRARY_PATH=@extraUtils@/lib`,
+  // which is load-bearing for cryptsetup/lvm/mdadm/btrfs-progs builds that
+  // the initrd ships with non-standard rpath-less linkage.
+  if let Some(utils) = extra_utils {
+    let lib_dir = utils.join("lib");
+    // SAFETY: same rationale as the PATH set-var above.
+    unsafe {
+      env::set_var("LD_LIBRARY_PATH", &lib_dir);
+    }
   }
 
   // Create /bin and /sbin symlinks if extra_utils is provided
@@ -560,17 +584,21 @@ fn settle_udev() -> Result<()> {
 fn activate_lvm() -> Result<()> {
   log_message("Activating LVM volumes...", true);
 
-  // Run vgchange to activate volume groups
-  let status = Command::new("vgchange").arg("-ay").status();
+  // extraUtils ships `lvm` (the multicall binary from lvm2) but not a
+  // standalone `vgchange`, matching stage-1.nix:122-124 which only copies
+  // dmsetup + lvm. Invoking `vgchange` directly therefore fails on the
+  // standard initrd; we must go through the multicall entry point just
+  // like `lvm vgchange -ay` in stage-1-init.sh:289.
+  let status = Command::new("lvm").args(["vgchange", "-ay"]).status();
 
-  if let Ok(status) = status {
-    if status.success() {
-      log_message("LVM volumes activated", true);
-    } else {
+  match status {
+    Ok(s) if s.success() => log_message("LVM volumes activated", true),
+    Ok(_) => {
       log_message("No LVM volumes found or activation failed", true);
-    }
-  } else {
-    log_message("vgchange not available, skipping LVM activation", true);
+    },
+    Err(_) => {
+      log_message("lvm not available, skipping LVM activation", true);
+    },
   }
 
   Ok(())
@@ -725,14 +753,21 @@ fn needs_fsck(fstype: &str, check_journaling: bool) -> bool {
   match fstype {
     // ext2 has no journal - always check it.
     "ext2" => true,
-    // ext3/ext4 have journaling; checking is optional.
-    "ext3" | "ext4" => check_journaling,
-    // fat/ntfs always need checking.
+    // Journaling filesystems where `fsck` works but is an expensive no-op
+    // unless checkJournalingFS is on. Matches stage-1-init.sh:340-345:
+    // userspace fsck is only invoked when the operator explicitly opts in.
+    "ext3" | "ext4" | "reiserfs" | "xfs" | "jfs" | "f2fs" => check_journaling,
+    // fat/ntfs have no journal; always check.
     "vfat" | "msdos" | "ntfs" => true,
-    // btrfs and xfs have their own dedicated check tools (btrfs check /
-    // xfs_repair); generic fsck does not support them and must not be run
-    // on them.
-    "btrfs" | "xfs" => false,
+    // Self-healing / kernel-side-checked filesystems that generic fsck must
+    // never touch (line 309).
+    "btrfs" | "zfs" | "bcachefs" => false,
+    // Skipped explicitly upstream for various reasons (read-only, no fsck
+    // tool, experimental). Listed so reviewers see parity with the shell
+    // even though the default arm below would catch them.
+    "iso9660" | "udf" | "apfs" | "nilfs2" | "squashfs" | "erofs" => false,
+    // Anything we don't know about: don't invoke fsck. Matches the shell's
+    // `auto`-fallthrough behaviour at line 324.
     _ => false,
   }
 }
@@ -758,35 +793,50 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
 
   let status = cmd.status().context("Failed to run fsck")?;
 
-  // fsck exit codes: 0 = OK, 1 = errors corrected, 2 = system should be
-  // rebooted
-  match status.code() {
-    Some(0 | 1) => Ok(true),
-    Some(2) => {
-      log_message("Filesystem errors corrected, reboot recommended", true);
-      Ok(true)
-    },
-    Some(4) => {
-      log_message("Filesystem errors left uncorrected", true);
-      Ok(false)
-    },
-    Some(8) => {
-      bail!("fsck: operational error");
-    },
-    Some(16) => {
-      bail!("fsck: usage or syntax error");
-    },
-    Some(32) => {
-      bail!("fsck: checking canceled by user request");
-    },
-    Some(128) => {
-      bail!("fsck: shared library error");
-    },
-    _ => {
-      log_message("fsck returned unknown exit code", true);
-      Ok(true) // Continue anyway
-    },
+  // fsck returns a bitmap; combined codes like 3 (1|2) and 6 (2|4) are
+  // common. stage-1-init.sh:352-366 handles this with bitwise-OR tests:
+  //   bit 1 (value 2) set  -> reboot immediately
+  //   bit 2 (value 4) set  -> unrepaired errors, fail
+  //   code >= 8            -> fsck itself failed, fail
+  //   bit 0 only (0 or 1)  -> OK / errors corrected, continue
+  let Some(code) = status.code() else {
+    // Signal death etc.; matching "code >= 8" branch.
+    bail!("fsck was terminated by a signal: {status}");
+  };
+
+  if code & 2 != 0 {
+    log_message(
+      &format!("fsck finished on {device}, rebooting..."),
+      true,
+    );
+    // Give kmsg a moment to flush, then request a reboot.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let _ = Command::new("reboot").arg("-f").status();
+    // If reboot(1) is missing or failed to take effect, fall through to a
+    // panic so the caller spawns the recovery shell instead of silently
+    // mounting a filesystem that asked for a reboot.
+    bail!("fsck requested reboot but `reboot -f` did not halt the system");
   }
+
+  if code & 4 != 0 {
+    bail!(
+      "{device} has unrepaired errors (fsck exit code {code}); fix \
+       manually",
+    );
+  }
+
+  if code >= 8 {
+    bail!("fsck on {device} failed with exit code {code}");
+  }
+
+  // code is 0 or 1 here: clean, or errors corrected and safe to mount.
+  if code == 1 {
+    log_message(
+      &format!("fsck corrected errors on {device}"),
+      true,
+    );
+  }
+  Ok(true)
 }
 
 fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
@@ -979,7 +1029,11 @@ fn mount_root(
         break;
       }
 
-      // Periodically re-trigger block events so udev populates by-* symlinks.
+      // Periodically re-trigger block events so udev populates by-* symlinks,
+      // and re-run `vgchange -ay` to activate LVM volumes that showed up
+      // after the initial device setup (stacked LVM / late-arriving USB /
+      // slow PVs). stage-1-init.sh does the lvm retry inline in the same
+      // loop (lines 87-120).
       if last_retrigger.elapsed() >= Duration::from_secs(3) {
         let _ = Command::new("udevadm")
           .args(["trigger", "--subsystem-match=block", "--action=change"])
@@ -987,6 +1041,19 @@ fn mount_root(
         let _ = Command::new("udevadm")
           .args(["settle", "--timeout=3"])
           .status();
+        if Command::new("lvm")
+          .arg("--version")
+          .stdout(std::process::Stdio::null())
+          .stderr(std::process::Stdio::null())
+          .status()
+          .is_ok_and(|s| s.success())
+        {
+          let _ = Command::new("lvm")
+            .args(["vgchange", "-ay"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        }
         last_retrigger = Instant::now();
       }
 
@@ -1348,6 +1415,59 @@ fn copy_initrd_secrets(target_root: &Path) -> Result<()> {
     }
   }
 
+  Ok(())
+}
+
+/// Emit a udev rule mapping the real root device to /dev/root so systemd's
+/// mount-unit generator can find it. Matches stage-1-init.sh:615-624, which
+/// does the equivalent via `udevadm info --device-id-of-file`.
+fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
+  // Prefer the iso file if this is a livecd boot, as the shell does; fall back
+  // to stat'ing target_root itself so bind-mounted / overlay roots still work.
+  let iso = target_root.join("iso");
+  let stat_target = if iso.exists() { iso } else { target_root.to_path_buf() };
+
+  let meta = match fs::metadata(&stat_target) {
+    Ok(m) => m,
+    Err(e) => {
+      log_message(
+        &format!(
+          "Skipping /dev/root udev rule; stat({}) failed: {e}",
+          stat_target.display()
+        ),
+        true,
+      );
+      return Ok(());
+    },
+  };
+
+  let dev = meta.dev();
+  let (major, minor) = (libc::major(dev), libc::minor(dev));
+
+  // Shell: `if [ "$ROOT_MAJOR" -a "$ROOT_MINOR" -a "$ROOT_MAJOR" != 0 ]`.
+  if major == 0 {
+    log_message(
+      "Skipping /dev/root udev rule; root is not on a block device (pseudo fs?)",
+      true,
+    );
+    return Ok(());
+  }
+
+  let rules_dir = Path::new("/run/udev/rules.d");
+  fs::create_dir_all(rules_dir).with_context(|| {
+    format!("Failed to create {}", rules_dir.display())
+  })?;
+  let rule = format!(
+    "ACTION==\"add|change\", SUBSYSTEM==\"block\", ENV{{MAJOR}}==\"{major}\", \
+     ENV{{MINOR}}==\"{minor}\", SYMLINK+=\"root\"\n"
+  );
+  let path = rules_dir.join("61-dev-root-link.rules");
+  fs::write(&path, rule)
+    .with_context(|| format!("Failed to write {}", path.display()))?;
+  log_message(
+    &format!("Wrote /dev/root udev rule ({major}:{minor}) to {}", path.display()),
+    true,
+  );
   Ok(())
 }
 
@@ -1777,7 +1897,23 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to start udev")?;
   trigger_udev().context("Failed to trigger udev events")?;
   settle_udev().context("Failed to settle udev")?;
+
+  // LUKS-on-LVM and similar stacked setups need a hook here to cryptsetup-open
+  // devices before vgchange can scan them. stage-1-init.sh:286 injects
+  // `@preLVMCommands@` at exactly this point.
+  run_hook_script(
+    config.pre_lvm_commands.as_deref(),
+    "pre-LVM commands",
+  )
+  .context("Pre-LVM commands failed")?;
+
   activate_lvm().context("Failed to activate LVM")?;
+
+  // Operator-triggered checkpoint: drop into the recovery shell after devices
+  // are assembled but before anything is mounted. Matches stage-1-init.sh:291.
+  if cmdline.debug1devices {
+    fail("boot.debug1devices checkpoint reached", &cmdline, &config);
+  }
 
   run_hook_script(
     config.post_device_commands.as_deref(),
@@ -1884,6 +2020,9 @@ pub fn run(args: &[String]) -> Result<()> {
   run_hook_script(config.post_mount_commands.as_deref(), "post-mount commands")
     .context("Post-mount commands failed")?;
 
+  write_dev_root_udev_rule(&config.target_root)
+    .context("Failed to emit /dev/root udev rule")?;
+
   copy_iso_to_ram(&cmdline, &config.target_root)
     .context("Failed to copy ISO to RAM")?;
   handle_persistence(&cmdline, &config.target_root)
@@ -1903,6 +2042,12 @@ pub fn run(args: &[String]) -> Result<()> {
   let _ = Command::new(&udevadm).args(["control", "--exit"]).status();
 
   kill_remaining_processes().context("Failed to kill remaining processes")?;
+
+  // Post-kill-processes checkpoint (stage-1-init.sh:649). Deliberately after
+  // udevd is gone so the recovery shell is the only thing still running.
+  if cmdline.debug1mounts {
+    fail("boot.debug1mounts checkpoint reached", &cmdline, &config);
+  }
 
   let init = cmdline
     .init

@@ -20,7 +20,9 @@ struct Args {
 
 struct InitEntry {
   label: String,
-  path:  String,
+  // Full path to the stage-2 init executable. Matches `$stage2=$path/init`
+  // in upstream init-script-builder.sh; every generated stub exec's this.
+  init:  String,
 }
 
 /// Build the /sbin/init boot menu and configuration list from installed
@@ -44,11 +46,12 @@ pub fn run(args: &[String]) -> Result<()> {
     eprintln!("warning: /boot is on a different filesystem than /");
   }
 
+  let default_init = format!("{}/init", args.default_config);
   let mut entries: Vec<InitEntry> = Vec::new();
 
   entries.push(InitEntry {
     label: "NixOS - Default".to_string(),
-    path:  args.default_config.clone(),
+    init:  default_init.clone(),
   });
 
   add_specialisations(system_dir, &mut entries)?;
@@ -58,8 +61,8 @@ pub fn run(args: &[String]) -> Result<()> {
   // first; then generation entries sorted newest-first. Without partitioning,
   // default/specialisation entries would get generation 0 from unwrap_or(0)
   // and sort to the end of the list.
-  let gen_name_of = |path: &str| -> String {
-    Path::new(path)
+  let gen_name_of = |init_path: &str| -> String {
+    Path::new(init_path)
       .parent()
       .and_then(|p| p.file_name())
       .map(|n| n.to_string_lossy().into_owned())
@@ -68,18 +71,18 @@ pub fn run(args: &[String]) -> Result<()> {
 
   let (non_gen, mut gen_entries): (Vec<InitEntry>, Vec<InitEntry>) = entries
     .into_iter()
-    .partition(|e| parse_generation_number(&gen_name_of(&e.path)).is_none());
+    .partition(|e| parse_generation_number(&gen_name_of(&e.init)).is_none());
 
   gen_entries.sort_by(|a, b| {
-    let a_num = parse_generation_number(&gen_name_of(&a.path)).unwrap_or(0);
-    let b_num = parse_generation_number(&gen_name_of(&b.path)).unwrap_or(0);
+    let a_num = parse_generation_number(&gen_name_of(&a.init)).unwrap_or(0);
+    let b_num = parse_generation_number(&gen_name_of(&b.init)).unwrap_or(0);
     b_num.cmp(&a_num)
   });
 
   let mut entries = non_gen;
   entries.extend(gen_entries);
 
-  write_init_files(&entries, &args.default_config)?;
+  write_init_files(&entries, &default_init)?;
 
   Ok(())
 }
@@ -109,7 +112,7 @@ fn add_specialisations(
     if init_path.exists() {
       entries.push(InitEntry {
         label: format!("NixOS - {name_str}"),
-        path:  init_path.to_string_lossy().to_string(),
+        init:  init_path.to_string_lossy().to_string(),
       });
     }
   }
@@ -139,7 +142,7 @@ fn add_generations(entries: &mut Vec<InitEntry>) -> Result<()> {
           Ok(suffix) => {
             entries.push(InitEntry {
               label: format!("NixOS - Configuration {num}{suffix}"),
-              path:  init_path.to_string_lossy().to_string(),
+              init:  init_path.to_string_lossy().to_string(),
             });
           },
           Err(e) => {
@@ -233,13 +236,23 @@ fn extract_kernel_version(kernel_path: &Path) -> Result<String> {
   })
 }
 
-fn write_init_files(entries: &[InitEntry], default_config: &str) -> Result<()> {
+const OTHER_CONFIGS_PATH: &str = "/boot/init-other-configurations-contents.txt";
+
+fn write_init_files(entries: &[InitEntry], default_init: &str) -> Result<()> {
+  // The default entry is the one whose init path matches $default_config/init.
+  // Its label goes at the top of /sbin/init as a comment; every entry (default
+  // included) is appended to $OTHER_CONFIGS_PATH as a runnable stub.
+  let default_label = entries
+    .iter()
+    .find(|e| e.init == default_init)
+    .map_or("NixOS - Default", |e| e.label.as_str());
+
   // Write /sbin/init atomically via a temp file.
   // Clean up the temp file if any step fails so we don't leave stale files.
   let sbin_init_tmp = "/sbin/init.tmp";
   let result = (|| -> Result<()> {
     let mut sbin_init = File::create(sbin_init_tmp)?;
-    write_sbin_init(&mut sbin_init, default_config)?;
+    write_sbin_init(&mut sbin_init, default_label, default_init)?;
     drop(sbin_init);
     let perms = Permissions::from_mode(0o755);
     fs::set_permissions(sbin_init_tmp, perms)?;
@@ -252,41 +265,44 @@ fn write_init_files(entries: &[InitEntry], default_config: &str) -> Result<()> {
   }
 
   // Write configs list atomically via a temp file.
-  let configs_tmp = "/boot/init-other-configurations-contents.txt.tmp";
+  let configs_tmp = format!("{OTHER_CONFIGS_PATH}.tmp");
   let result = (|| -> Result<()> {
-    let mut configs = File::create(configs_tmp)?;
+    let mut configs = File::create(&configs_tmp)?;
     write_configs_file(&mut configs, entries)?;
     drop(configs);
-    fs::rename(configs_tmp, "/boot/init-other-configurations-contents.txt")?;
+    fs::rename(&configs_tmp, OTHER_CONFIGS_PATH)?;
     Ok(())
   })();
   if result.is_err() {
-    let _ = fs::remove_file(configs_tmp);
+    let _ = fs::remove_file(&configs_tmp);
     return result;
   }
 
   Ok(())
 }
 
-fn write_sbin_init(file: &mut File, default_config: &str) -> Result<()> {
+fn write_sbin_init(
+  file: &mut File,
+  default_label: &str,
+  default_init: &str,
+) -> Result<()> {
   writeln!(file, "#!/bin/sh")?;
-  writeln!(file, "# NixOS")?;
+  writeln!(file, "# {default_label}")?;
   writeln!(file, "# created by init-script-builder")?;
-  // XXX: Single-quote the path to prevent shell metacharacter expansion.
-  // Embedded single quotes are escaped via the '"'"' idiom.
-  let escaped = default_config.replace('\'', "'\\''");
-  writeln!(file, "exec '{escaped}/init'")?;
+  writeln!(file, "exec {default_init}")?;
+  writeln!(file, "# older configurations: {OTHER_CONFIGS_PATH}")?;
   Ok(())
 }
 
+/// Each entry becomes a standalone shell script body separated by a blank
+/// line, matching init-script-builder.sh:44-57.
 fn write_configs_file(file: &mut File, entries: &[InitEntry]) -> Result<()> {
   for entry in entries {
-    // Escape backslashes first, then double-quotes, to prevent format
-    // corruption. We gotta think about ordering too though; escaping '"' before
-    // '\\' would double-escape the new backslashes.
-    let label = entry.label.replace('\\', "\\\\").replace('"', "\\\"");
-    let path = entry.path.replace('\\', "\\\\").replace('"', "\\\"");
-    writeln!(file, "\"{label}\" \"{path}\"")?;
+    writeln!(file, "#!/bin/sh")?;
+    writeln!(file, "# {}", entry.label)?;
+    writeln!(file, "# created by init-script-builder")?;
+    writeln!(file, "exec {}", entry.init)?;
+    writeln!(file)?;
   }
   Ok(())
 }
