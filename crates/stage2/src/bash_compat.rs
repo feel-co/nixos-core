@@ -46,6 +46,14 @@ pub fn run(args: &Args) -> Result<()> {
        setup",
     );
   } else {
+    // Stage 2 may be entered directly (no stage 1) - e.g. on systems where
+    // the bootloader invokes /sbin/init or the initrd handoff skipped the
+    // remount. stage-2-init.sh does the same remount unconditionally outside
+    // of containers (systemd / nspawn exports $container to mark those).
+    if std::env::var_os("container").is_none() {
+      remount_root_rw(&log_dest)
+        .context("Failed to remount / rw")?;
+    }
     mount_special_filesystems(&log_dest)
       .context("Failed to mount special filesystems")?;
   }
@@ -105,6 +113,24 @@ fn setup_path(args: &Args) -> Result<()> {
     std::env::set_var("PATH", &args.path);
   }
   Ok(())
+}
+
+fn remount_root_rw(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
+  let root = Path::new("/");
+  // /proc/mounts isn't available yet in the no-stage-1 path; skip the
+  // already-rw check and let the remount be idempotent.
+  log_message(
+    log_dest.as_deref(),
+    "stage-2-init: remounting / read-write",
+  );
+  mount(
+    None::<&str>,
+    root,
+    None::<&str>,
+    MsFlags::MS_REMOUNT,
+    None::<&str>,
+  )
+  .context("mount -o remount,rw / failed")
 }
 
 fn mount_special_filesystems(
