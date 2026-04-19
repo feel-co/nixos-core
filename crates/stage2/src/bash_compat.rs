@@ -82,21 +82,18 @@ pub fn run(args: &Args) -> Result<()> {
     // probably wants to pass --early-mount-script so that cgroup2 / efivarfs /
     // etc. don't go missing.
     if !Path::new("/proc").join("1").exists() {
-      match args.early_mount_script.as_deref() {
-        Some(script) => {
-          run_early_mount_script(script, &log_dest)
-            .context("Failed to run early mount script")?;
-        },
-        None => {
-          log_message(
-            log_dest.as_deref(),
-            "stage-2-init: warning: no --early-mount-script; only mounting \
-             the hardcoded /proc, /dev, /sys, /dev/pts, /dev/shm set. Any \
-             additional boot.specialFileSystems entries will be absent.",
-          );
-          mount_special_filesystems(&log_dest)
-            .context("Failed to mount special filesystems")?;
-        },
+      if let Some(script) = args.early_mount_script.as_deref() {
+        run_early_mount_script(script, &log_dest)
+          .context("Failed to run early mount script")?;
+      } else {
+        log_message(
+          log_dest.as_deref(),
+          "stage-2-init: warning: no --early-mount-script; only mounting \
+           the hardcoded /proc, /dev, /sys, /dev/pts, /dev/shm set. Any \
+           additional boot.specialFileSystems entries will be absent.",
+        );
+        mount_special_filesystems(&log_dest)
+          .context("Failed to mount special filesystems")?;
       }
     }
   }
@@ -360,7 +357,7 @@ fn shell_escape(s: &str) -> String {
 
 /// Bash-style "+ cmd args..." trace emitted on stderr before a subprocess
 /// starts. Active whenever boot.debugtrace is on the kernel cmdline; checked
-/// each call so the behaviour follows log::max_level rather than the env.
+/// each call so the behaviour follows `log::max_level` rather than the env.
 fn trace_spawn(program: &std::ffi::OsStr, args: &[&std::ffi::OsStr]) {
   if log::max_level() < log::LevelFilter::Trace {
     return;

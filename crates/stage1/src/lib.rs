@@ -546,9 +546,7 @@ fn start_udev(
     fs::write(udev_conf, "udev_log=err\n")?;
   }
 
-  let udevd = extra_utils
-    .map(|u| u.join("bin/systemd-udevd"))
-    .unwrap_or_else(|| PathBuf::from("systemd-udevd"));
+  let udevd = extra_utils.map_or_else(|| PathBuf::from("systemd-udevd"), |u| u.join("bin/systemd-udevd"));
 
   Command::new(&udevd)
     .arg("--daemon")
@@ -2043,9 +2041,7 @@ pub fn run(args: &[String]) -> Result<()> {
   log_message("Stopping udevd...", true);
   let udevadm = config
     .extra_utils
-    .as_deref()
-    .map(|u| u.join("bin/udevadm"))
-    .unwrap_or_else(|| PathBuf::from("udevadm"));
+    .as_deref().map_or_else(|| PathBuf::from("udevadm"), |u| u.join("bin/udevadm"));
   let _ = Command::new(&udevadm).args(["control", "--exit"]).status();
 
   kill_remaining_processes().context("Failed to kill remaining processes")?;
