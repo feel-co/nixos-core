@@ -132,7 +132,7 @@ pub fn run(args: &Args) -> Result<()> {
     .context("Failed to record boot configuration")?;
 
   if let Some(ref post_boot) = args.post_boot_commands {
-    run_post_boot_commands(post_boot, &log_dest)
+    run_post_boot_commands(&args.post_boot_shell, post_boot, &log_dest)
       .context("Post-boot commands failed")?;
   }
 
@@ -707,6 +707,7 @@ fn record_boot_config(
 }
 
 fn run_post_boot_commands(
+  shell: &Path,
   commands_path: &Path,
   log_dest: &Option<std::path::PathBuf>,
 ) -> Result<()> {
@@ -717,19 +718,23 @@ fn run_post_boot_commands(
   log_message(
     log_dest.as_deref(),
     &format!(
-      "stage-2-init: running post-boot commands: {}",
+      "stage-2-init: running post-boot commands: {} {}",
+      shell.display(),
       commands_path.display()
     ),
   );
 
-  // Run via shell: the file is stored in the nix store which may be noexec,
-  // and the file itself may not have the execute bit set (e.g. pkgs.writeText).
-  let status = Command::new("/bin/sh")
+  // Run via the configured shell: upstream uses bash (`@shell@`), and user
+  // post-boot scripts commonly rely on bashisms. The file lives in the nix
+  // store which may be noexec, and often doesn't carry the execute bit
+  // (e.g. pkgs.writeText), so we must always invoke it through a shell.
+  let status = Command::new(shell)
     .arg(commands_path)
     .status()
     .with_context(|| {
       format!(
-        "Failed to execute post-boot commands: {}",
+        "Failed to execute post-boot commands: {} {}",
+        shell.display(),
         commands_path.display()
       )
     })?;

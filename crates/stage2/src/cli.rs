@@ -39,6 +39,13 @@ pub struct Args {
   #[arg(long, env = "POST_BOOT_COMMANDS")]
   pub post_boot_commands: Option<PathBuf>,
 
+  /// Shell used to invoke --post-boot-commands. The upstream script hard-
+  /// wires this to bash via `@shell@ @postBootCommands@`; the Nix module
+  /// should point this at the same binary so bash-isms in the user's hook
+  /// keep working. Defaults to /bin/sh which may be dash on minimal systems.
+  #[arg(long, env = "POST_BOOT_SHELL", default_value = "/bin/sh")]
+  pub post_boot_shell: PathBuf,
+
   /// Path to the nix-generated early mount script (equivalent to
   /// `@earlyMountScript@` in stage-2-init.sh). When set, this file is sourced
   /// with a `specialMount` shell helper in scope, so it can set up any
