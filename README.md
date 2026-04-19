@@ -1,16 +1,16 @@
 # NixOS Core
 
 This is a multi-call binary implementing core NixOS system utilities in safe,
-portable Rust to replace some of the Perl and Bash scripts that are generally
+portable Rust, replacing some of the Perl and Bash scripts that are generally
 load-bearing. While those scripts _can_ be replaced through various means such
 as the Perl-less and Bash-less profiles, those usually change how your system
-behaves while enabled, and may yield general instability or breakage. Such is
-the case for the `/etc` overlay.
+behaves and may yield general instability or breakage, as is the case with the
+`/etc` overlay.
 
-Thus, this is a monorepository providing a multi-call [^1] Rust binary to
-replace some of the fragile scripts, and in some cases utilities _already_
-written in Rust. See the [motivation section](#motivation) if you want to know
-why we also try to replace Rust code with more Rust code.
+This monorepository provides a multi-call [^1] Rust binary to replace some of
+these fragile scripts, and in some cases utilities _already_ written in Rust.
+See the [motivation section](#motivation) for why we also try to replace Rust
+code with more Rust code.
 
 [here]: https://github.com/orangecms/multicall/blob/main/README.md
 
@@ -20,14 +20,14 @@ why we also try to replace Rust code with more Rust code.
     multicall binaries have also been called "BusyBox-like", which should
     _probably_ be what you're thinking of for the purposes of this project.
 
-In short, this package replaces legacy bash/Perl scripts that execute on every
-NixOS system during boot and activation. The multi-call binary design (like
-BusyBox) reduces binary size and simplifies deployment.
+The package replaces legacy Bash and Perl scripts that execute on every NixOS
+system during boot and activation. The multi-call binary design, like BusyBox,
+reduces binary size and simplifies deployment.
 
 ## Compatibility Matrix/Overview
 
-The scope of this program is rather limited at the moment. It is limited in the
-sense that Nixpkgs does not allow replacing most legacy solutions
+The scope of this program is currently limited by what Nixpkgs permits in terms
+of replacing legacy solutions.
 
 <!--markdownlint-disable MD013-->
 
@@ -41,16 +41,16 @@ sense that Nixpkgs does not allow replacing most legacy solutions
 
 <!--markdownlint-enable MD013-->
 
-This project is currently in a "research preview" state, where _base rewrites_
-are done but not yet verified in a real system. Until components are verified
-through VM tests, it is not recommended to use those components on a production
-system. The items marked as "awaits verification" above are those I am **yet to
-test on real hardware**. Some VM tests will, naturally, exist but we cannot know
-for certain that everything works as expected until it boots on baremetal.
+This project is currently in a "research preview" state. Base rewrites are
+complete but not yet verified on a real system. Until components are verified
+through VM tests, do not use them on a production system. Items marked "Awaiting
+Verification" have not yet been tested on real hardware. Some VM tests will
+naturally exist, but we cannot know with certainty that everything works as
+expected until it boots on bare metal.
 
 ## Usage
 
-`nixos-core` is a multi-call binary that can be called either as a symlink:
+`nixos-core` is a multi-call binary invocable either as a symlink:
 
 ```bash
 # Invoke the update-users-groups command
@@ -64,16 +64,16 @@ Or explicitly as a subcommand:
 $ nixos-core update-users-groups /nix/store/...-users-groups.json
 ```
 
-This usage pattern, like the mono-repo design, is a deliberate choice to allow
-re-using code and shared patterns without the cognitive load of having to
-cross-reference projects.
+This usage pattern, like the mono-repo design, is a deliberate choice that
+allows reusing code and shared patterns without the cognitive overhead of
+cross-referencing separate projects.
 
 ### Feature Flags/Overrides
 
-All of the commands provided by nixos-core are **feature-gated**. This is so
-that you can disable commands you don't need at build-time, and to let you pick
-_which_ binaries to install and replace. You can use the feature flags while
-building with `cargo`, or the package arguments while building with Nix:
+All commands provided by `nixos-core` are feature-gated, letting you disable
+commands you don't need at build time and choose which binaries to install and
+replace. Feature flags work both with `cargo` and as package arguments when
+building with Nix:
 
 ```nix
 [(prev: final: {
@@ -85,46 +85,53 @@ building with `cargo`, or the package arguments while building with Nix:
 
 [`stage2` crate's README]: ./crates/stage2/README.md
 
-There exists some _additional_ feature flags, also exposed by the overridable
-attributes of the package, that you can use to control the **stage 2** behaviour
-of nixos-core. Namely, `bootspec`, `systemd-integration` and
-`full-nixos-init-compat` to provide complete compatibility with the pre-existing
-behaviour of Nixpkgs' stage 2 behaviour. In the case you are developing a
-Systemd-less NixOS variant but still would like to manage stage 2, you can
-disable `systemd-integration` and still keep bootspec support! Most of those
-features are described in detail at the [`stage2` crate's README].
+Additional feature flags, also exposed as overridable package attributes,
+control the behavior of **stage 2**. These are `bootspec`,
+`systemd-integration`, and `full-nixos-init-compat`, providing complete
+compatibility with the pre-existing behavior of Nixpkgs' stage 2. If you are
+developing a systemd-less NixOS variant but still want to manage stage 2, you
+can disable `systemd-integration` while retaining `bootspec` support. Most of
+these features are described in detail in the [`stage2` crate's README].
 
 ## Motivation
 
 [MicrOS]: https://github.com/snugnug/micros
 
-This project aims to be a safe, independent utility for NixOS **and** NixOS
-derivatives such as [MicrOS] with the core goals of being fast, portable, and
-consistent. It is an out-of-tree module exactly to meet those goals, but without
-the behavioural changes imposed by the Nixpkgs alternatives such as Userborn or
-nixos-init. That is not to say that those are fundamentally incompatible, but
-they are _different_. Perhaps there will be some collaboration in the future.
+This project aims to be a safe, independent utility for NixOS and NixOS
+derivatives such as [MicrOS], with the core goals of being fast, portable, and
+consistent. It is an out-of-tree module to meet those goals without the
+behavioral changes imposed by Nixpkgs alternatives like Userborn or nixos-init.
+That is not to say those are fundamentally incompatible with this project, but
+they are _different_. There may be room for collaboration in the future.
 
 ## Hacking
 
-nixos-core is built with latest Rust stable available in Nixpkgs, which is
-1.94.0 at the time of writing. Thus, the Minimum Supported Rust Version (MSRV)
-for this project has been set as 1.94.0. This may change in the future as the
-Rust language evolves.
+`nixos-core` is built with the latest stable Rust available in Nixpkgs, which is
+1.94.0 at the time of writing. The Minimum Supported Rust Version (MSRV) is
+therefore set at 1.94.0, and may change as the language evolves.
 
 ### Safety
 
-- No `unsafe` code except unavoidable syscalls (crypt, geteuid)
-- Explicit error handling with `?` operator
+- No `unsafe` code except for unavoidable syscalls (`crypt`, `geteuid`)
+- Explicit error handling with the `?` operator
 - Dry-run mode available for all destructive operations
 
 ### Testing
 
-Run NixOS tests after changes:
+This repository provides a few VM test to verify correct behaviour. Those are
+rather limited at the time but should provide some amount of guidance for you.
 
 ```bash
-nix-build -A nixosTests.nixos-rebuild-specialisations
+# Run all VM tests that are exposed under `checks`
+$ nix flake check
+
+# Run a specific VM tests
+$ nix build .#checks.x86_64-linux.boot
 ```
+
+You can find the available NixOS VM tests in the [nix/vm-tests](./nix/vm-tests/)
+directory. If you're adding new features, you should ad a new test component or
+some subtests that verify that your code works exactly as expected.
 
 ## License
 
