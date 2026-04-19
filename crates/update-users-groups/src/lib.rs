@@ -397,27 +397,30 @@ pub fn run(args: &[String]) -> Result<()> {
       hashed_password = Some(hash_password(pw)?);
     }
 
-    // Create home directory if requested.
+    // Create home directory if requested, and re-apply ownership/mode on every
+    // activation to repair drift - matching the Perl script, which always ran
+    // chown/chmod under createHome regardless of whether the directory already
+    // existed.
     if u.create_home
       && !is_dry
       && let Some(ref home) = u.home
     {
       let home_path = Path::new(home);
-      // Refuse to chown if home is a symlink; would change ownership of the
-      // link target.
+      // Refuse to chown a symlink; would change ownership of the link target.
+      // The Perl script didn't check this, but stomping on an arbitrary
+      // chown target is worse than erroring.
       if let Ok(meta) = home_path.symlink_metadata()
         && meta.file_type().is_symlink()
       {
         bail!("Home directory path '{home}' is a symlink - refusing to chown");
       }
       if !home_path.exists() {
-        // Only chown freshly created home dirs.
         fs::create_dir_all(home).with_context(|| {
           format!("Failed to create home directory: {home}")
         })?;
-        chown(home, Some(uid), Some(gid))
-          .with_context(|| format!("Failed to chown home directory: {home}"))?;
       }
+      chown(home, Some(uid), Some(gid))
+        .with_context(|| format!("Failed to chown home directory: {home}"))?;
       if let Some(ref mode_str) = u.home_mode {
         let mode = u32::from_str_radix(mode_str, 8).with_context(|| {
           format!("Invalid home mode '{mode_str}' for user '{name}'")
