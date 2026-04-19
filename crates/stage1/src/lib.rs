@@ -48,6 +48,8 @@ struct KernelCmdline {
   console:       Vec<String>,
   shell_on_fail: bool,
   debug1:        bool,
+  debug1devices: bool,
+  debug1mounts:  bool,
   debug:         bool,
   trace:         bool,
   panic_on_fail: bool,
@@ -94,6 +96,14 @@ impl KernelCmdline {
         },
         "boot.debug1" => {
           cmdline.debug1 =
+            value.as_ref().is_none_or(|v| v != "0" && v != "false");
+        },
+        "boot.debug1devices" => {
+          cmdline.debug1devices =
+            value.as_ref().is_none_or(|v| v != "0" && v != "false");
+        },
+        "boot.debug1mounts" => {
+          cmdline.debug1mounts =
             value.as_ref().is_none_or(|v| v != "0" && v != "false");
         },
         "boot.debug" => {
@@ -1895,6 +1905,12 @@ pub fn run(args: &[String]) -> Result<()> {
 
   activate_lvm().context("Failed to activate LVM")?;
 
+  // Operator-triggered checkpoint: drop into the recovery shell after devices
+  // are assembled but before anything is mounted. Matches stage-1-init.sh:291.
+  if cmdline.debug1devices {
+    fail("boot.debug1devices checkpoint reached", &cmdline, &config);
+  }
+
   run_hook_script(
     config.post_device_commands.as_deref(),
     "post-device commands",
@@ -2022,6 +2038,12 @@ pub fn run(args: &[String]) -> Result<()> {
   let _ = Command::new(&udevadm).args(["control", "--exit"]).status();
 
   kill_remaining_processes().context("Failed to kill remaining processes")?;
+
+  // Post-kill-processes checkpoint (stage-1-init.sh:649). Deliberately after
+  // udevd is gone so the recovery shell is the only thing still running.
+  if cmdline.debug1mounts {
+    fail("boot.debug1mounts checkpoint reached", &cmdline, &config);
+  }
 
   let init = cmdline
     .init
