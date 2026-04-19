@@ -49,6 +49,16 @@ pub fn run(args: &Args) -> Result<()> {
        setup",
     );
   } else {
+    if has_kernel_cmdline_flag("boot.debugtrace") {
+      // Shell equivalent is `set -x`: dump each activation/post-boot command
+      // to stderr. Bump log level so every `info!`/`debug!` reaches kmsg.
+      log::set_max_level(log::LevelFilter::Trace);
+      log_message(
+        log_dest.as_deref(),
+        "stage-2-init: boot.debugtrace set; tracing enabled",
+      );
+    }
+
     // Stage 2 may be entered directly (no stage 1) - e.g. on systems where
     // the bootloader invokes /sbin/init or the initrd handoff skipped the
     // remount. stage-2-init.sh does the same remount unconditionally outside
@@ -314,6 +324,16 @@ fn shell_escape(s: &str) -> String {
   }
   out.push('\'');
   out
+}
+
+/// Whitespace-tokenized scan of /proc/cmdline for a bare flag. Matches the
+/// shell's `for o in $(</proc/cmdline); do case $o in flag) ... esac done`
+/// idiom: only the exact token counts, not prefixes or `key=value` matches.
+fn has_kernel_cmdline_flag(flag: &str) -> bool {
+  let Ok(cmdline) = fs::read_to_string("/proc/cmdline") else {
+    return false;
+  };
+  cmdline.split_whitespace().any(|tok| tok == flag)
 }
 
 fn remount_root_rw(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
