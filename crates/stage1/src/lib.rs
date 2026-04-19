@@ -19,6 +19,174 @@ use nix::{
   unistd::{chdir, chroot, execv, getpid},
 };
 
+#[derive(Debug)]
+enum DeviceManager {
+  Udev { udevd: PathBuf, udevadm: PathBuf },
+  Mdev { mdev: PathBuf },
+}
+
+impl Default for DeviceManager {
+  fn default() -> Self {
+    Self::Udev {
+      udevd:   PathBuf::from("systemd-udevd"),
+      udevadm: PathBuf::from("udevadm"),
+    }
+  }
+}
+
+impl DeviceManager {
+  fn from_env(extra_utils: Option<&Path>) -> Self {
+    match env::var("DEVICE_MANAGER").as_deref() {
+      Ok("mdev") => {
+        Self::Mdev {
+          mdev: env::var("MDEV_BINARY").map(PathBuf::from).unwrap_or_else(
+            |_| {
+              extra_utils
+                .map_or_else(|| PathBuf::from("mdev"), |u| u.join("bin/mdev"))
+            },
+          ),
+        }
+      },
+      _ => {
+        Self::Udev {
+          udevd:   env::var("UDEV_BINARY").map(PathBuf::from).unwrap_or_else(
+            |_| {
+              extra_utils.map_or_else(
+                || PathBuf::from("systemd-udevd"),
+                |u| u.join("bin/systemd-udevd"),
+              )
+            },
+          ),
+          udevadm: env::var("UDEVADM_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+              extra_utils.map_or_else(
+                || PathBuf::from("udevadm"),
+                |u| u.join("bin/udevadm"),
+              )
+            }),
+        }
+      },
+    }
+  }
+
+  fn start(&self, rules_path: Option<&Path>) -> Result<()> {
+    log_message("Starting device manager...", true);
+    match self {
+      Self::Udev { udevd, .. } => {
+        if let Some(rules) = rules_path {
+          let rules_dir = Path::new("/etc/udev/rules.d");
+          fs::create_dir_all(rules_dir)?;
+          if rules.is_dir() {
+            for entry in fs::read_dir(rules)? {
+              let entry = entry?;
+              fs::copy(entry.path(), rules_dir.join(entry.file_name()))?;
+            }
+          }
+        }
+        let conf = Path::new("/etc/udev/udev.conf");
+        if !conf.exists() {
+          fs::create_dir_all(conf.parent().unwrap())?;
+          fs::write(conf, "udev_log=err\n")?;
+        }
+        Command::new(udevd)
+          .arg("--daemon")
+          .status()
+          .with_context(|| {
+            format!("Failed to start udevd: {}", udevd.display())
+          })?;
+      },
+      Self::Mdev { mdev } => {
+        // -d: listen for kernel hotplug events; -s: initial coldplug scan.
+        Command::new(mdev).arg("-d").status().with_context(|| {
+          format!("Failed to start mdev: {}", mdev.display())
+        })?;
+        Command::new(mdev).arg("-s").status().with_context(|| {
+          format!("mdev coldplug scan failed: {}", mdev.display())
+        })?;
+      },
+    }
+    log_message("Device manager started", true);
+    Ok(())
+  }
+
+  fn trigger(&self) -> Result<()> {
+    log_message("Triggering device events...", true);
+    match self {
+      Self::Udev { udevadm, .. } => {
+        Command::new(udevadm)
+          .args(["trigger", "--action=add"])
+          .status()
+          .context("Failed to trigger udev events")?;
+      },
+      Self::Mdev { .. } => {
+        // Covered by the -s scan in start(); nothing more to do.
+      },
+    }
+    Ok(())
+  }
+
+  fn settle(&self) -> Result<()> {
+    log_message("Waiting for device manager to settle...", true);
+    match self {
+      Self::Udev { udevadm, .. } => {
+        let status = Command::new(udevadm)
+          .args(["settle", "--timeout=30"])
+          .status()
+          .context("Failed to wait for udev")?;
+        if !status.success() {
+          log_message("Warning: udev settle timed out", true);
+        }
+      },
+      Self::Mdev { .. } => {
+        // mdev -s is synchronous; no separate settle step.
+      },
+    }
+    Ok(())
+  }
+
+  // Best-effort block re-trigger used in device-polling loops; errors are
+  // swallowed.
+  fn retrigger_block(&self) {
+    match self {
+      Self::Udev { udevadm, .. } => {
+        let _ = Command::new(udevadm)
+          .args(["trigger", "--subsystem-match=block", "--action=change"])
+          .status();
+        let _ = Command::new(udevadm)
+          .args(["settle", "--timeout=3"])
+          .status();
+      },
+      Self::Mdev { mdev } => {
+        let _ = Command::new(mdev).arg("-s").status();
+      },
+    }
+  }
+
+  fn stop(&self) {
+    log_message("Stopping device manager...", true);
+    match self {
+      Self::Udev { udevadm, .. } => {
+        let _ = Command::new(udevadm).args(["control", "--exit"]).status();
+      },
+      Self::Mdev { mdev } => {
+        let name = mdev.file_name().unwrap_or(mdev.as_os_str());
+        let _ = Command::new("pkill").arg(name).status();
+      },
+    }
+  }
+
+  // Write /dev/root udev rule so systemd's mount-unit generator can find the
+  // root device. mdev does not process /run/udev/rules.d, so this is a no-op
+  // for that backend.
+  fn write_dev_root_rule(&self, target_root: &Path) -> Result<()> {
+    match self {
+      Self::Udev { .. } => write_dev_root_udev_rule(target_root),
+      Self::Mdev { .. } => Ok(()),
+    }
+  }
+}
+
 #[derive(Debug, Default)]
 struct Stage1Config {
   target_root:          PathBuf,
@@ -39,6 +207,8 @@ struct Stage1Config {
   check_journaling_fs:  bool,
   set_host_id:          Option<String>,
   distro_name:          String,
+  device_manager:       DeviceManager,
+  link_units_dest:      PathBuf,
 }
 
 #[derive(Debug, Default)]
@@ -149,43 +319,49 @@ impl KernelCmdline {
 
 impl Stage1Config {
   fn from_env() -> Self {
+    let extra_utils: Option<PathBuf> =
+      env::var("extraUtils").ok().map(PathBuf::from);
+    let device_manager = DeviceManager::from_env(extra_utils.as_deref());
+
     Self {
-      target_root:          env::var("targetRoot")
+      target_root: env::var("targetRoot")
         .map_or_else(|_| PathBuf::from("/mnt-root"), PathBuf::from),
-      extra_utils:          env::var("extraUtils").ok().map(PathBuf::from),
-      kernel_modules:       env::var("kernelModules")
+      extra_utils,
+      kernel_modules: env::var("kernelModules")
         .map(|mods| mods.split_whitespace().map(String::from).collect())
         .unwrap_or_default(),
-      resume_device:        env::var("resumeDevice").ok(),
-      resume_devices:       env::var("resumeDevices")
+      resume_device: env::var("resumeDevice").ok(),
+      resume_devices: env::var("resumeDevices")
         .map(|devs| devs.split_whitespace().map(String::from).collect())
         .unwrap_or_default(),
-      fs_info:              env::var("fsInfo").ok().map(PathBuf::from),
-      pre_fail_commands:    env::var("preFailCommands").ok().map(PathBuf::from),
-      pre_device_commands:  env::var("preDeviceCommands")
+      fs_info: env::var("fsInfo").ok().map(PathBuf::from),
+      pre_fail_commands: env::var("preFailCommands").ok().map(PathBuf::from),
+      pre_device_commands: env::var("preDeviceCommands")
         .ok()
         .map(PathBuf::from),
-      pre_lvm_commands:     env::var("preLVMCommands").ok().map(PathBuf::from),
+      pre_lvm_commands: env::var("preLVMCommands").ok().map(PathBuf::from),
       post_device_commands: env::var("postDeviceCommands")
         .ok()
         .map(PathBuf::from),
       post_resume_commands: env::var("postResumeCommands")
         .ok()
         .map(PathBuf::from),
-      post_mount_commands:  env::var("postMountCommands")
+      post_mount_commands: env::var("postMountCommands")
         .ok()
         .map(PathBuf::from),
-      early_mount_script:   env::var("earlyMountScript")
-        .ok()
-        .map(PathBuf::from),
-      udev_rules:           env::var("udevRules").ok().map(PathBuf::from),
-      link_units:           env::var("linkUnits").ok().map(PathBuf::from),
-      check_journaling_fs:  env::var("checkJournalingFS")
+      early_mount_script: env::var("earlyMountScript").ok().map(PathBuf::from),
+      udev_rules: env::var("udevRules").ok().map(PathBuf::from),
+      link_units: env::var("linkUnits").ok().map(PathBuf::from),
+      check_journaling_fs: env::var("checkJournalingFS")
         .map(|v| v != "0" && v != "false")
         .unwrap_or(true),
-      set_host_id:          env::var("HOST_ID").ok(),
-      distro_name:          env::var("distroName")
+      set_host_id: env::var("HOST_ID").ok(),
+      distro_name: env::var("distroName")
         .unwrap_or_else(|_| "NixOS".to_string()),
+      device_manager,
+      link_units_dest: env::var("LINK_UNITS_DEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/systemd/network")),
     }
   }
 }
@@ -438,8 +614,13 @@ fn is_mounted(path: &Path) -> bool {
   false
 }
 
-// Wait up to timeout_secs for device to appear; re-triggers udev periodically.
-fn wait_for_device(device: &str, timeout_secs: u64) -> Result<()> {
+// Wait up to timeout_secs for device to appear; re-triggers the device manager
+// periodically.
+fn wait_for_device(
+  device: &str,
+  timeout_secs: u64,
+  dm: &DeviceManager,
+) -> Result<()> {
   let device_path = Path::new(device);
   let start = Instant::now();
   let timeout = Duration::from_secs(timeout_secs);
@@ -453,14 +634,8 @@ fn wait_for_device(device: &str, timeout_secs: u64) -> Result<()> {
       return Ok(());
     }
 
-    // Re-trigger udev every 5 seconds so block events aren't missed.
     if last_retrigger.elapsed() >= Duration::from_secs(5) {
-      let _ = Command::new("udevadm")
-        .args(["trigger", "--subsystem-match=block", "--action=change"])
-        .status();
-      let _ = Command::new("udevadm")
-        .args(["settle", "--timeout=3"])
-        .status();
+      dm.retrigger_block();
       last_retrigger = Instant::now();
     }
 
@@ -508,87 +683,14 @@ fn load_kernel_modules(modules: &[String], no_modprobe: bool) -> Result<()> {
   Ok(())
 }
 
-fn setup_link_units(link_units: &Path) -> Result<()> {
-  fs::create_dir_all("/etc/systemd")?;
-  let dest = Path::new("/etc/systemd/network");
+fn setup_link_units(link_units: &Path, dest: &Path) -> Result<()> {
+  if let Some(parent) = dest.parent() {
+    fs::create_dir_all(parent)?;
+  }
   if dest.is_symlink() || dest.exists() {
     fs::remove_file(dest)?;
   }
   symlink(link_units, dest)?;
-  Ok(())
-}
-
-// Mirrors stage-1-init.sh line 280: `systemd-udevd --daemon`
-// (systemd-udevd is a symlink to udevadm in extra-utils; there is no udevd
-// binary)
-fn start_udev(
-  rules_path: Option<&Path>,
-  extra_utils: Option<&Path>,
-) -> Result<()> {
-  log_message("Starting udevd...", true);
-
-  if let Some(rules) = rules_path {
-    let udev_rules_dir = Path::new("/etc/udev/rules.d");
-    fs::create_dir_all(udev_rules_dir)?;
-
-    if rules.is_dir() {
-      for entry in fs::read_dir(rules)? {
-        let entry = entry?;
-        let dest = udev_rules_dir.join(entry.file_name());
-        fs::copy(entry.path(), dest)?;
-      }
-    }
-  }
-
-  let udev_conf = Path::new("/etc/udev/udev.conf");
-  if !udev_conf.exists() {
-    fs::create_dir_all(udev_conf.parent().unwrap())?;
-    fs::write(udev_conf, "udev_log=err\n")?;
-  }
-
-  let udevd = extra_utils.map_or_else(
-    || PathBuf::from("systemd-udevd"),
-    |u| u.join("bin/systemd-udevd"),
-  );
-
-  Command::new(&udevd)
-    .arg("--daemon")
-    .status()
-    .map_err(|e| {
-      log_message(&format!("systemd-udevd spawn failed: {e}"), true);
-      e
-    })
-    .context("Failed to start systemd-udevd")?;
-
-  log_message("udevd started", true);
-  Ok(())
-}
-
-fn trigger_udev() -> Result<()> {
-  log_message("Triggering udev events...", true);
-
-  Command::new("udevadm")
-    .arg("trigger")
-    .arg("--action=add")
-    .status()
-    .context("Failed to trigger udev events")?;
-
-  Ok(())
-}
-
-fn settle_udev() -> Result<()> {
-  log_message("Waiting for udev to settle...", true);
-
-  let status = Command::new("udevadm")
-    .arg("settle")
-    .arg("--timeout=30")
-    .status()
-    .context("Failed to settle udev")?;
-
-  if !status.success() {
-    log_message("Warning: udev settle timed out", true);
-  }
-
   Ok(())
 }
 
@@ -939,6 +1041,7 @@ fn mount_root(
   cmdline: &KernelCmdline,
   target_root: &Path,
   fs_infos: &[FsInfo],
+  dm: &DeviceManager,
 ) -> Result<()> {
   log_message("Mounting root filesystem...", true);
 
@@ -1035,18 +1138,11 @@ fn mount_root(
         break;
       }
 
-      // Periodically re-trigger block events so udev populates by-* symlinks,
-      // and re-run `vgchange -ay` to activate LVM volumes that showed up
-      // after the initial device setup (stacked LVM / late-arriving USB /
-      // slow PVs). stage-1-init.sh does the lvm retry inline in the same
-      // loop (lines 87-120).
+      // Periodically re-trigger block events and re-run `vgchange -ay` to
+      // activate LVM volumes that showed up after initial device setup
+      // (stacked LVM / late-arriving USB / slow PVs).
       if last_retrigger.elapsed() >= Duration::from_secs(3) {
-        let _ = Command::new("udevadm")
-          .args(["trigger", "--subsystem-match=block", "--action=change"])
-          .status();
-        let _ = Command::new("udevadm")
-          .args(["settle", "--timeout=3"])
-          .status();
+        dm.retrigger_block();
         if Command::new("lvm")
           .arg("--version")
           .stdout(std::process::Stdio::null())
@@ -1213,6 +1309,7 @@ fn copy_iso_to_ram(cmdline: &KernelCmdline, target_root: &Path) -> Result<()> {
 fn handle_persistence(
   cmdline: &KernelCmdline,
   target_root: &Path,
+  dm: &DeviceManager,
 ) -> Result<()> {
   let persist_opt = match &cmdline.persistence {
     Some(p) => p.clone(),
@@ -1231,7 +1328,7 @@ fn handle_persistence(
   };
 
   if let Some(dev) = device {
-    wait_for_device(&dev, 10).ok();
+    wait_for_device(&dev, 10, dm).ok();
 
     let persist_mount = Path::new("/run/persistence");
     fs::create_dir_all(persist_mount)?;
@@ -1897,14 +1994,22 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to load kernel modules")?;
 
   if let Some(link_units) = config.link_units.as_deref() {
-    setup_link_units(link_units)
+    setup_link_units(link_units, &config.link_units_dest)
       .context("Failed to set up systemd link units")?;
   }
 
-  start_udev(config.udev_rules.as_deref(), config.extra_utils.as_deref())
-    .context("Failed to start udev")?;
-  trigger_udev().context("Failed to trigger udev events")?;
-  settle_udev().context("Failed to settle udev")?;
+  config
+    .device_manager
+    .start(config.udev_rules.as_deref())
+    .context("Failed to start device manager")?;
+  config
+    .device_manager
+    .trigger()
+    .context("Failed to trigger device events")?;
+  config
+    .device_manager
+    .settle()
+    .context("Failed to settle device manager")?;
 
   // LUKS-on-LVM and similar stacked setups need a hook here to cryptsetup-open
   // devices before vgchange can scan them. stage-1-init.sh:286 injects
@@ -1949,7 +2054,12 @@ pub fn run(args: &[String]) -> Result<()> {
     Vec::new()
   };
 
-  if let Err(e) = mount_root(&cmdline, &config.target_root, &fs_infos) {
+  if let Err(e) = mount_root(
+    &cmdline,
+    &config.target_root,
+    &fs_infos,
+    &config.device_manager,
+  ) {
     fail(
       &format!("Failed to mount root filesystem: {e}"),
       &cmdline,
@@ -2031,12 +2141,14 @@ pub fn run(args: &[String]) -> Result<()> {
   run_hook_script(config.post_mount_commands.as_deref(), "post-mount commands")
     .context("Post-mount commands failed")?;
 
-  write_dev_root_udev_rule(&config.target_root)
+  config
+    .device_manager
+    .write_dev_root_rule(&config.target_root)
     .context("Failed to emit /dev/root udev rule")?;
 
   copy_iso_to_ram(&cmdline, &config.target_root)
     .context("Failed to copy ISO to RAM")?;
-  handle_persistence(&cmdline, &config.target_root)
+  handle_persistence(&cmdline, &config.target_root, &config.device_manager)
     .context("Failed to handle persistence")?;
   handle_lustrate(&config.target_root).context("Failed to handle lustrate")?;
   copy_initrd_secrets(&config.target_root)
@@ -2044,12 +2156,7 @@ pub fn run(args: &[String]) -> Result<()> {
   set_host_id(config.set_host_id.as_deref())
     .context("Failed to set host ID")?;
 
-  log_message("Stopping udevd...", true);
-  let udevadm = config
-    .extra_utils
-    .as_deref()
-    .map_or_else(|| PathBuf::from("udevadm"), |u| u.join("bin/udevadm"));
-  let _ = Command::new(&udevadm).args(["control", "--exit"]).status();
+  config.device_manager.stop();
 
   kill_remaining_processes().context("Failed to kill remaining processes")?;
 
