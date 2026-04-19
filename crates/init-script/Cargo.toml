@@ -8,7 +8,6 @@ repository.workspace   = true
 description            = "NixOS generic init script builder"
 
 [dependencies]
-activation-common.workspace = true
-anyhow.workspace            = true
-chrono.workspace            = true
-clap.workspace              = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace   = true

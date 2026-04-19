@@ -21,6 +21,7 @@ update-users-groups = { path = "./crates/update-users-groups" }
 anyhow     = "1.0.102"
 chrono     = "0.4.44"
 clap       = { version = "4.6.1", features = [ "derive", "env" ] }
+env_logger = "0.11.10"
 libc       = "0.2.185"
 log        = "0.4.29"
 nix        = { version = "0.31.2", features = [ "user", "fs", "process", "mount", "signal" ] }
@@ -29,6 +30,7 @@ rand       = "0.10.1"
 serde      = { version = "1.0.228", features = [ "derive" ] }
 serde_json = "1.0.149"
 tempfile   = "3.27.0"
+time       = { version = "0.3.47", default-features = false, features = [ "parsing", "formatting", "macros" ] }
 
 [workspace.lints.clippy]
 cargo      = { level = "warn", priority = -1 }

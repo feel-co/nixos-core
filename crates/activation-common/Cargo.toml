@@ -9,4 +9,3 @@ description            = "Common utilities for NixOS activation scripts"
 
 [dependencies]
 anyhow.workspace = true
-nix.workspace    = true

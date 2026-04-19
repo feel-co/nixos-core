@@ -180,10 +180,7 @@ fn apply_etc_tree(
       let mode_str = match fs::read_to_string(&mode_file) {
         Ok(s) => s,
         Err(e) => {
-          eprintln!(
-            "warning: failed to read {}: {e}",
-            mode_file.display()
-          );
+          eprintln!("warning: failed to read {}: {e}", mode_file.display());
           continue;
         },
       };
@@ -195,7 +192,10 @@ fn apply_etc_tree(
         let link_target = match fs::read_link(&current) {
           Ok(t) => t,
           Err(e) => {
-            eprintln!("warning: failed to read symlink {}: {e}", current.display());
+            eprintln!(
+              "warning: failed to read symlink {}: {e}",
+              current.display()
+            );
             continue;
           },
         };

@@ -7,13 +7,7 @@ license.workspace      = true
 repository.workspace   = true
 description            = "NixOS stage 1 initrd bootstrap"
 
-[lib]
-name = "stage1"
-path = "src/lib.rs"
-
 [dependencies]
-activation-common = { path = "../activation-common" }
-anyhow.workspace  = true
-clap.workspace    = true
-libc.workspace    = true
-nix.workspace     = true
+anyhow.workspace = true
+libc.workspace   = true
+nix.workspace    = true

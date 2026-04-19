@@ -12,10 +12,9 @@ name = "setup_etc"
 path = "src/lib.rs"
 
 [dependencies]
-activation-common = { path = "../activation-common" }
-anyhow.workspace  = true
-clap.workspace    = true
-libc.workspace    = true
+anyhow.workspace = true
+clap.workspace   = true
+libc.workspace   = true
 
 [dev-dependencies]
 tempfile.workspace = true
