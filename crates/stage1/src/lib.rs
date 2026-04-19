@@ -619,8 +619,8 @@ fn activate_lvm() -> Result<()> {
 fn udev_fs_type(device: &str) -> Option<String> {
   let meta = fs::metadata(device).ok()?;
   let rdev = meta.rdev();
-  let major = ((rdev >> 8) & 0xFFF) | ((rdev >> 32) & !0xFFF);
-  let minor = (rdev & 0xFF) | ((rdev >> 12) & !0xFF);
+  let major = libc::major(rdev);
+  let minor = libc::minor(rdev);
   let content =
     fs::read_to_string(format!("/run/udev/data/b{major}:{minor}")).ok()?;
   content.lines().find_map(|line| {
@@ -635,8 +635,11 @@ fn udev_fs_type(device: &str) -> Option<String> {
 
 fn has_swap_signature(device: &str) -> bool {
   // Swap header magic ("SWAPSPACE2") sits at the last 10 bytes of page 0.
-  let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-  let offset = page_size.saturating_sub(10);
+  let page_size_raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+  if page_size_raw <= 0 {
+    return false;
+  }
+  let offset = (page_size_raw as u64).saturating_sub(10);
   let Ok(mut f) = File::open(device) else {
     return false;
   };
@@ -690,9 +693,8 @@ fn handle_resume(
       .context("Failed to stat resume device")
       .and_then(|meta| {
         let rdev = meta.rdev();
-        // Standard Linux major/minor extraction.
-        let major = ((rdev >> 8) & 0xFFF) | ((rdev >> 32) & !0xFFF);
-        let minor = (rdev & 0xFF) | ((rdev >> 12) & !0xFF);
+        let major = libc::major(rdev);
+        let minor = libc::minor(rdev);
         fs::write("/sys/power/resume", format!("{major}:{minor}"))
           .context("Failed to write to /sys/power/resume")
       })
@@ -1089,9 +1091,10 @@ fn mount_root(
     mount_opts.push("rw".to_string());
   }
 
-  // Check and run fsck if needed
+  // Check and run fsck if needed; propagate errors so the caller can invoke
+  // the recovery shell rather than mounting a corrupt root filesystem.
   if needs_fsck(&fstype, true) {
-    run_fsck(mount_device, &fstype, &mount_opts).ok();
+    run_fsck(mount_device, &fstype, &mount_opts)?;
   }
 
   // Mount the root filesystem
@@ -1955,8 +1958,14 @@ pub fn run(args: &[String]) -> Result<()> {
   }
 
   for fs_info in &fs_infos {
-    if needs_fsck(&fs_info.fstype, config.check_journaling_fs) {
-      run_fsck(&fs_info.device, &fs_info.fstype, &fs_info.options).ok();
+    if needs_fsck(&fs_info.fstype, config.check_journaling_fs)
+      && let Err(e) =
+        run_fsck(&fs_info.device, &fs_info.fstype, &fs_info.options)
+    {
+      log_message(
+        &format!("Warning: fsck failed on {}: {e:#}", fs_info.device),
+        true,
+      );
     }
   }
 
