@@ -5,9 +5,9 @@
     self,
     nixpkgs,
   }: let
-    systems = ["x86_64-linux" "aarch64-linux"];
-    forEachSystem = nixpkgs.lib.genAttrs systems;
-    pkgsForEach = system: nixpkgs.legacyPackages.${system};
+    inherit (nixpkgs.lib) genAttrs systems;
+    forEachSystem = genAttrs systems.doubles.linux;
+    pkgsForEach = system: import nixpkgs { inherit system; };
   in {
     nixosModules = {
       nixos-core = import ./nix/modules/nixos.nix self;
