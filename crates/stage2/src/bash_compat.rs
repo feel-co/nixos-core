@@ -534,18 +534,19 @@ fn setup_nix_store(
     );
   }
 
-  // Apply mount options if /nix/store is a separate mount
-  if is_mounted(store_path) {
-    let desired_opts: Vec<String> = args
-      .nix_store_mount_opts
-      .split(',')
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty())
-      .collect();
+  // Apply mount options *unconditionally*
+  // When /nix/store is not already a separate mountpoint (e.g., systemd initrd
+  // where only the root fs is mounted), apply_nix_store_mount_opts treats all
+  // desired options as missing and creates the bind mount itself.
+  let store_opts: Vec<String> = args
+    .nix_store_mount_opts
+    .split(',')
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .collect();
 
-    apply_nix_store_mount_opts(store_path, &desired_opts, log_dest)
-      .context("Failed to apply /nix/store mount options")?;
-  }
+  apply_nix_store_mount_opts(store_path, &store_opts, log_dest)
+    .context("Failed to apply /nix/store mount options")?;
 
   Ok(())
 }
@@ -555,7 +556,10 @@ fn apply_nix_store_mount_opts(
   desired_opts: &[String],
   log_dest: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-  let current_opts = get_mount_options(store_path)?;
+  // Fall back to empty when the path has no separate mountpoint entry (e.g.
+  // it sits on the root fs). Treating all desired options as missing causes
+  // the bind+remount below to apply them.
+  let current_opts = get_mount_options(store_path).unwrap_or_default();
 
   fn opt_to_flag(opt: &str) -> Option<MsFlags> {
     match opt {
