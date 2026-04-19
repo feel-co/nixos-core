@@ -1203,8 +1203,6 @@ mod tests {
     assert_eq!(date_to_days("1970-01-02").unwrap(), 1);
     // 2000-01-01 = 10957 days after epoch
     assert_eq!(date_to_days("2000-01-01").unwrap(), 10957);
-    // 1970-01-02 should be exactly 1 day after epoch
-    assert_eq!(date_to_days("1970-01-02").unwrap(), 1);
     // A known leap year date
     assert!(date_to_days("2024-02-29").is_ok());
     // Invalid formats
