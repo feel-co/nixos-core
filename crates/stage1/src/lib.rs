@@ -201,6 +201,18 @@ fn setup_environment(extra_utils: Option<&Path>) -> Result<()> {
     env::set_var("PATH", &path);
   }
 
+  // Export LD_LIBRARY_PATH so extraUtils binaries find their bundled libs.
+  // Matches stage-1-init.sh:14, `export LD_LIBRARY_PATH=@extraUtils@/lib`,
+  // which is load-bearing for cryptsetup/lvm/mdadm/btrfs-progs builds that
+  // the initrd ships with non-standard rpath-less linkage.
+  if let Some(utils) = extra_utils {
+    let lib_dir = utils.join("lib");
+    // SAFETY: same rationale as the PATH set-var above.
+    unsafe {
+      env::set_var("LD_LIBRARY_PATH", &lib_dir);
+    }
+  }
+
   // Create /bin and /sbin symlinks if extra_utils is provided
   if let Some(utils) = extra_utils {
     let bin_dir = Path::new("/bin");
