@@ -404,10 +404,15 @@ in {
         etcActivationCommands = mkIf cfg.components.etcActivation.enable (mkForce cfg.components.etcActivation.script);
       };
 
-      activationScripts.users = mkIf cfg.components.userGroupsActivation.enable (mkForce {
-        supportsDryActivation = true;
-        text = cfg.components.userGroupsActivation.script;
-      });
+      # Only force the `text`, not the whole record. Other modules (notably
+      # agenix, which injects `users.deps = [ "agenixInstall" ]`) merge their
+      # own attributes into this script; replacing the record wholesale with
+      # mkForce nukes those contributions and lands agenixChown before
+      # agenixNewGeneration, so $_agenix_generation is empty when chown runs.
+      activationScripts.users = mkIf cfg.components.userGroupsActivation.enable {
+        supportsDryActivation = lib.mkDefault true;
+        text = mkForce cfg.components.userGroupsActivation.script;
+      };
     };
   };
 }

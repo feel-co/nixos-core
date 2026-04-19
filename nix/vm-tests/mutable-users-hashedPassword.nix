@@ -1,23 +1,24 @@
-# VM test reinforcing the mutableUsers hashedPassword contract implemented by
-# update-users-groups (crates/update-users-groups/src/lib.rs).
-#
-# Two halves mirroring the Perl script:
-#
-#   mutableUsers = true  -> activation must NOT clobber shadow entries the
-#   user set interactively (passwd(1) / chpasswd). This is the behavioural
-#   change called out in NotAShelf's review of ut (update-users-groups:
-#   preserve passwd(1)-set hashes in mutable mode).
-#
-#   mutableUsers = false -> activation MUST re-apply the spec's
-#   hashedPassword, clobbering any local change.
-self: {pkgs, ...}: let
-  # Two pre-computed SHA-512 crypt hashes; the values are irrelevant beyond
-  # being valid and distinct.
+# Reinforces the mutableUsers hashedPassword contract in
+# update-users-groups: in `mutableUsers = true` mode, activation MUST NOT
+# clobber shadow entries the user set interactively (passwd(1)/chpasswd),
+# while in `mutableUsers = false` mode activation MUST re-apply the spec
+# hash over any local edit. The `users.nix` sibling test already asserts
+# that an immutable user with no hashedPassword is reset to "!"; this test
+# asserts the behaviour when hashedPassword IS set, which is the
+# load-bearing case called out in NotAShelf's review of
+# `update-users-groups: preserve passwd(1)-set hashes in mutable mode`.
+{
+  mkTest,
+  nixosModule,
+  testCommons,
+}: let
   hashA = "$6$tBd0y.v0jtG7SpqS$3YJGM9Hk.oMsGH6.v6MdW8kzFJg/zphs8S/o6PpTfc8j2QsF7LIJjLbxdP4cxc3aJlG7U8zghdrQzFZRbpwGS0";
   hashB = "$6$mU7oGq7HZFH.u41v$W.qZfFFHVhTxwh8U7vRs5ToqPGJgO.i06y6cEw6T/GNMj.NcChZrEomTM8DODE3C5x2Atl0WqIOg/LU4Nll4n0";
 
   mkCommon = mutable: {
+    imports = [nixosModule testCommons];
     system.nixos-core.enable = true;
+    boot.loader.grub.enable = false;
     users.mutableUsers = mutable;
     users.users.alice = {
       isNormalUser = true;
@@ -25,16 +26,12 @@ self: {pkgs, ...}: let
     };
   };
 in
-  pkgs.testers.nixosTest {
+  mkTest {
     name = "nixos-core-mutable-users-hashedPassword";
 
     nodes = {
-      mutable = {
-        imports = [self.nixosModules.nixos-core (mkCommon true)];
-      };
-      immutable = {
-        imports = [self.nixosModules.nixos-core (mkCommon false)];
-      };
+      mutable = mkCommon true;
+      immutable = mkCommon false;
     };
 
     testScript = ''
@@ -55,9 +52,9 @@ in
           )
           assert shadow(m, "alice") == "${hashB}", "shadow edit failed"
 
-      # Re-run update-users-groups; system config is unchanged so the only
-      # variable is mutableUsers. /run/current-system/activate runs the whole
-      # activation script, which invokes update-users-groups.
+      # Re-run activation; config is unchanged so the only variable is
+      # mutableUsers. /run/current-system/activate runs the whole activation
+      # script, which invokes update-users-groups.
       for m in (mutable, immutable):
           m.succeed("/run/current-system/activate")
 

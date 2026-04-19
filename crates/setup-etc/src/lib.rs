@@ -125,11 +125,18 @@ fn apply_etc_tree(
       continue;
     }
 
-    // Ensure the parent directory exists.
-    if let Some(parent) = target.parent() {
-      fs::create_dir_all(parent).with_context(|| {
-        format!("Failed to create parent dir for {}", target.display())
-      })?;
+    // Ensure the parent directory exists. Matches Perl's
+    // `File::Path::make_path(dirname $target)`; if this fails we skip the
+    // entry and keep processing the rest of the tree rather than abort the
+    // whole activation.
+    if let Some(parent) = target.parent()
+      && let Err(e) = fs::create_dir_all(parent)
+    {
+      eprintln!(
+        "warning: failed to create parent dir for {}: {e}",
+        target.display()
+      );
+      continue;
     }
 
     created.insert(relative_str.clone());
@@ -150,12 +157,16 @@ fn apply_etc_tree(
 
     // If the store entry is a symlink but /etc already has a plain directory:
     // remove the directory if all its contents are themselves static, otherwise
-    // warn.
+    // warn. Perl uses `rmtree $target or warn;` - non-fatal.
     if current_is_symlink && target_is_dir {
       if is_fully_static(&target, etc_static) {
-        fs::remove_dir_all(&target).with_context(|| {
-          format!("Failed to remove static dir {}", target.display())
-        })?;
+        if let Err(e) = fs::remove_dir_all(&target) {
+          eprintln!(
+            "warning: failed to remove static dir {}: {e}",
+            target.display()
+          );
+          continue;
+        }
       } else {
         eprintln!(
           "warning: not replacing /etc/{relative_str} (non-static directory) \
@@ -166,27 +177,50 @@ fn apply_etc_tree(
     }
 
     if mode_file.exists() {
-      let mode_str = fs::read_to_string(&mode_file)
-        .with_context(|| format!("Failed to read {}", mode_file.display()))?;
+      let mode_str = match fs::read_to_string(&mode_file) {
+        Ok(s) => s,
+        Err(e) => {
+          eprintln!(
+            "warning: failed to read {}: {e}",
+            mode_file.display()
+          );
+          continue;
+        },
+      };
       let mode_str = mode_str.trim();
 
       if mode_str == "direct-symlink" {
         // The store entry is a symlink; copy the symlink's *target* directly
         // to /etc, rather than pointing into /etc/static.
-        let link_target = fs::read_link(&current).with_context(|| {
-          format!("Failed to read symlink {}", current.display())
-        })?;
-        atomic_symlink(&link_target, &target).with_context(|| {
-          format!("Failed to create direct symlink {}", target.display())
-        })?;
+        let link_target = match fs::read_link(&current) {
+          Ok(t) => t,
+          Err(e) => {
+            eprintln!("warning: failed to read symlink {}: {e}", current.display());
+            continue;
+          },
+        };
+        if let Err(e) = atomic_symlink(&link_target, &target) {
+          eprintln!(
+            "warning: could not create direct symlink {}: {e}",
+            target.display()
+          );
+          continue;
+        }
         // Record in copied list; /etc/.clean gets written atomically at the
         // end of the run rather than appended to incrementally.
         copied.push(relative_str.clone());
       } else {
         // Numeric octal mode: copy the file with explicit uid/gid/mode.
-        let mode = u32::from_str_radix(mode_str, 8).with_context(|| {
-          format!("Invalid mode '{}' in {}", mode_str, mode_file.display())
-        })?;
+        let mode = match u32::from_str_radix(mode_str, 8) {
+          Ok(m) => m,
+          Err(e) => {
+            eprintln!(
+              "warning: invalid mode {mode_str:?} in {}: {e}",
+              mode_file.display()
+            );
+            continue;
+          },
+        };
 
         let uid_file = PathBuf::from(format!("{}.uid", current.display()));
         let gid_file = PathBuf::from(format!("{}.gid", current.display()));
@@ -197,34 +231,49 @@ fn apply_etc_tree(
           fs::read_to_string(&gid_file).unwrap_or_else(|_| "0".to_string());
 
         // Leading '+' means the value is already numeric; otherwise resolve
-        // the name via the on-disk databases.
-        let uid: u32 = resolve_id(uid_str.trim(), true).with_context(|| {
-          format!(
-            "Failed to resolve UID '{}' for /etc/{}",
-            uid_str.trim(),
-            relative_str
-          )
-        })?;
-        let gid: u32 =
-          resolve_id(gid_str.trim(), false).with_context(|| {
-            format!(
-              "Failed to resolve GID '{}' for /etc/{}",
-              gid_str.trim(),
-              relative_str
-            )
-          })?;
+        // the name via the on-disk databases. Perl warns rather than dies
+        // here via `$uid = getpwnam $uid`, which returns undef if the name
+        // is unknown and subsequently int()s to 0.
+        let uid: u32 = match resolve_id(uid_str.trim(), true) {
+          Ok(n) => n,
+          Err(e) => {
+            eprintln!(
+              "warning: unknown UID {:?} for /etc/{relative_str}: {e}",
+              uid_str.trim()
+            );
+            continue;
+          },
+        };
+        let gid: u32 = match resolve_id(gid_str.trim(), false) {
+          Ok(n) => n,
+          Err(e) => {
+            eprintln!(
+              "warning: unknown GID {:?} for /etc/{relative_str}: {e}",
+              gid_str.trim()
+            );
+            continue;
+          },
+        };
 
         // Source is at /etc/static/<relative>.
         let source = etc_static.join(relative);
         let tmp = PathBuf::from(format!("{}.tmp", target.display()));
 
-        fs::copy(&source, &tmp).with_context(|| {
-          format!("Failed to copy {} to {}", source.display(), tmp.display())
-        })?;
-        chown(&tmp, Some(uid), Some(gid))
-          .with_context(|| format!("Failed to chown {}", tmp.display()))?;
-        fs::set_permissions(&tmp, Permissions::from_mode(mode))
-          .with_context(|| format!("Failed to chmod {}", tmp.display()))?;
+        if let Err(e) = fs::copy(&source, &tmp) {
+          eprintln!(
+            "warning: failed to copy {} to {}: {e}",
+            source.display(),
+            tmp.display()
+          );
+          continue;
+        }
+        if let Err(e) = chown(&tmp, Some(uid), Some(gid)) {
+          eprintln!("warning: failed to chown {}: {e}", tmp.display());
+        }
+        if let Err(e) = fs::set_permissions(&tmp, Permissions::from_mode(mode))
+        {
+          eprintln!("warning: failed to chmod {}: {e}", tmp.display());
+        }
         match fs::rename(&tmp, &target) {
           Ok(()) => {
             // Record as a copied file; /etc/.clean is rewritten atomically
@@ -233,10 +282,9 @@ fn apply_etc_tree(
           },
           Err(e) => {
             eprintln!(
-              "warning: failed to rename {} to {}: {}",
+              "warning: failed to rename {} to {}: {e}",
               tmp.display(),
               target.display(),
-              e
             );
             let _ = fs::remove_file(&tmp);
           },
@@ -246,18 +294,34 @@ fn apply_etc_tree(
       // No .mode file and the store entry is a symlink: create a /etc/static
       // passthrough symlink, which points into /etc/static/<relative>.
       let static_target = etc_static.join(relative);
-      atomic_symlink(&static_target, &target).with_context(|| {
-        format!("Failed to create symlink {}", target.display())
-      })?;
+      if let Err(e) = atomic_symlink(&static_target, &target) {
+        eprintln!(
+          "warning: could not create symlink {}: {e}",
+          target.display()
+        );
+      }
     } else if current.is_dir() {
       // Directory: ensure it exists in /etc and descend into it.
-      fs::create_dir_all(&target).with_context(|| {
-        format!("Failed to create directory {}", target.display())
-      })?;
-      let mut children = read_dir_sorted(&current)?;
-      children.reverse();
-      for child in children {
-        stack.push(child);
+      if let Err(e) = fs::create_dir_all(&target) {
+        eprintln!(
+          "warning: failed to create directory {}: {e}",
+          target.display()
+        );
+        continue;
+      }
+      match read_dir_sorted(&current) {
+        Ok(mut children) => {
+          children.reverse();
+          for child in children {
+            stack.push(child);
+          }
+        },
+        Err(e) => {
+          eprintln!(
+            "warning: failed to read directory {}: {e}",
+            current.display()
+          );
+        },
       }
     }
     // Regular files without a .mode sidecar are not handled: the Perl script
