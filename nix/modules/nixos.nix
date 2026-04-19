@@ -382,7 +382,7 @@ in {
     # and override bootStage1/initialRamdisk with our wrapper.
     # With the systemd initrd stage-1 is handled by systemd; these don't apply.
     boot.initrd.extraUtilsCommands = mkIf cfg.components.extraUtilsCommand.enable ''
-      copy_bin_and_libs ${lib.getexe' cfg.package "nixos-core"}
+      copy_bin_and_libs ${lib.getExe' cfg.package "nixos-core"}
     '';
 
     system = {
