@@ -54,8 +54,30 @@ pub fn run(args: &Args) -> Result<()> {
       remount_root_rw(&log_dest)
         .context("Failed to remount / rw")?;
     }
-    mount_special_filesystems(&log_dest)
-      .context("Failed to mount special filesystems")?;
+
+    // Upstream `source @earlyMountScript@` path. If the caller supplied the
+    // nix-generated script we sourced every specialFileSystems entry via it;
+    // otherwise fall back to the tiny hardcoded set, logging that the caller
+    // probably wants to pass --early-mount-script so that cgroup2 / efivarfs /
+    // etc. don't go missing.
+    if !Path::new("/proc").join("1").exists() {
+      match args.early_mount_script.as_deref() {
+        Some(script) => {
+          run_early_mount_script(script, &log_dest)
+            .context("Failed to run early mount script")?;
+        },
+        None => {
+          log_message(
+            log_dest.as_deref(),
+            "stage-2-init: warning: no --early-mount-script; only mounting \
+             the hardcoded /proc, /dev, /sys, /dev/pts, /dev/shm set. Any \
+             additional boot.specialFileSystems entries will be absent.",
+          );
+          mount_special_filesystems(&log_dest)
+            .context("Failed to mount special filesystems")?;
+        },
+      }
+    }
   }
 
   // Non-fatal: 9p-mounted read-only stores in VMs reject chown/bind-mount.
@@ -113,6 +135,69 @@ fn setup_path(args: &Args) -> Result<()> {
     std::env::set_var("PATH", &args.path);
   }
   Ok(())
+}
+
+fn run_early_mount_script(
+  script: &Path,
+  log_dest: &Option<std::path::PathBuf>,
+) -> Result<()> {
+  log_message(
+    log_dest.as_deref(),
+    &format!(
+      "stage-2-init: sourcing early mount script: {}",
+      script.display()
+    ),
+  );
+
+  // Inlines the specialMount helper that stage-2-init.sh defines before the
+  // source, so the nix-generated script can be consumed verbatim.
+  let wrapper = format!(
+    r#"set -e
+specialMount() {{
+    local device="$1"
+    local mountPoint="$2"
+    local options="$3"
+    local fsType="$4"
+    if [ "${{IN_NIXOS_SYSTEMD_STAGE1:-}}" = "true" ] && [ "$mountPoint" = "/run" ]; then
+        return
+    fi
+    install -m 0755 -d "$mountPoint"
+    mount -n -t "$fsType" -o "$options" "$device" "$mountPoint"
+}}
+. {}
+"#,
+    shell_escape(&script.to_string_lossy()),
+  );
+
+  let status = Command::new("/bin/sh")
+    .arg("-c")
+    .arg(&wrapper)
+    .status()
+    .with_context(|| {
+      format!("Failed to invoke /bin/sh to run {}", script.display())
+    })?;
+
+  if !status.success() {
+    bail!(
+      "early mount script {} exited with status {status}",
+      script.display()
+    );
+  }
+  Ok(())
+}
+
+fn shell_escape(s: &str) -> String {
+  let mut out = String::with_capacity(s.len() + 2);
+  out.push('\'');
+  for c in s.chars() {
+    if c == '\'' {
+      out.push_str("'\\''");
+    } else {
+      out.push(c);
+    }
+  }
+  out.push('\'');
+  out
 }
 
 fn remount_root_rw(log_dest: &Option<std::path::PathBuf>) -> Result<()> {

@@ -39,6 +39,15 @@ pub struct Args {
   #[arg(long, env = "POST_BOOT_COMMANDS")]
   pub post_boot_commands: Option<PathBuf>,
 
+  /// Path to the nix-generated early mount script (equivalent to
+  /// `@earlyMountScript@` in stage-2-init.sh). When set, this file is sourced
+  /// with a `specialMount` shell helper in scope, so it can set up any
+  /// special-filesystem entry declared in `boot.specialFileSystems`. When
+  /// unset, stage 2 falls back to a small hardcoded set covering /proc, /dev,
+  /// /sys, /dev/pts, /dev/shm.
+  #[arg(long, env = "EARLY_MOUNT_SCRIPT")]
+  pub early_mount_script: Option<PathBuf>,
+
   /// Use host resolv.conf
   #[arg(long, env = "USE_HOST_RESOLV_CONF")]
   pub use_host_resolv_conf: bool,
