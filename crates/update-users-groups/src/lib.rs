@@ -1,7 +1,7 @@
 use std::{
   collections::{HashMap, HashSet},
   fs::{self, File, Permissions},
-  io::{BufRead, BufReader, Read, Write},
+  io::{BufRead, BufReader, Error, Write},
   os::unix::fs::{PermissionsExt, chown},
   path::Path,
 };
@@ -984,9 +984,21 @@ fn hash_password(password: &str) -> Result<String> {
   // with our own salt so the rand graph stays out.
   const CHARSET: &[u8; 64] =
     b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
   let mut raw = [0u8; 8];
-  let mut f = File::open("/dev/urandom").context("opening /dev/urandom")?;
-  f.read_exact(&mut raw).context("reading /dev/urandom")?;
+
+  // getrandom(2) reads directly from the kernel entropy pool without requiring
+  // /dev to be mounted. This is *especially* critical when running inside a
+  // chroot (e.g. the systemd-initrd prepare-root path where /dev is not yet
+  // populated.
+  let ret = unsafe {
+    libc::syscall(libc::SYS_getrandom, raw.as_mut_ptr(), raw.len(), 0u64)
+  };
+
+  if ret < 0 {
+    return Err(anyhow::anyhow!("getrandom: {}", Error::last_os_error()));
+  }
+
   let salt: String = raw
     .iter()
     .map(|b| CHARSET[(*b as usize) & 0x3F] as char)
