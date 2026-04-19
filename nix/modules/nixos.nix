@@ -4,6 +4,10 @@ self: {
   lib,
   ...
 }: let
+  inherit (lib.modules) mkIf mkForce;
+  inherit (lib.options) mkOption mkEnableOption mkPackageOption literalExpression;
+  inherit (lib.types) package lines;
+
   udev = config.systemd.package;
   extra-utils = config.system.build.extraUtils;
   useHostResolvConf = config.networking.resolvconf.enable && config.networking.useHostResolvConf;
@@ -83,9 +87,11 @@ self: {
   fsInfo = pkgs.writeText "initrd-fsinfo" (lib.concatStringsSep "\n" (lib.concatMap (fs: [
       fs.mountPoint
       (
-        if fs.device != null then fs.device
-        else if fs.label != null && fs.label != "" then "/dev/disk/by-label/${fs.label}"
-        else fs.fsType  # virtual filesystems (tmpfs, proc, etc.) use fsType as device
+        if fs.device != null
+        then fs.device
+        else if fs.label != null && fs.label != ""
+        then "/dev/disk/by-label/${fs.label}"
+        else fs.fsType # virtual filesystems (tmpfs, proc, etc.) use fsType as device
       )
       fs.fsType
       (builtins.concatStringsSep "," fs.options)
@@ -101,12 +107,7 @@ self: {
     )
     config.swapDevices;
 
-  resumeDevicesList = lib.concatStringsSep " " (map
-    (sd:
-      if sd ? device
-      then sd.device
-      else "/dev/disk/by-label/${sd.label}")
-    resumeDevices);
+  resumeDevicesList = lib.concatStringsSep " " (map (sd: sd.device or "/dev/disk/by-label/${sd.label}") resumeDevices);
 
   # Hook scripts: stage1 expects file paths, not inline text.
   preFailCommandsFile = pkgs.writeText "pre-fail-commands" config.boot.initrd.preFailCommands;
@@ -147,6 +148,7 @@ self: {
       ${lib.optionalString (config.networking.hostId != null) ''
         export HOST_ID=${lib.escapeShellArg config.networking.hostId}
       ''}
+
       exec ${extra-utils}/bin/nixos-core stage-1-init
     '';
   };
@@ -200,97 +202,208 @@ self: {
     }) (lib.filterAttrs (_: u: u.enable) config.users.users);
     groups = lib.attrValues config.users.groups;
   });
+
+  initialRamdisk = pkgs.makeInitrd {
+    name = "initrd-${config.boot.kernelPackages.kernel.name or "kernel"}";
+    inherit (config.boot.initrd) compressor compressorArgs prepend;
+    contents =
+      [
+        {
+          object = bootStage1;
+          symlink = "/init";
+        }
+        {
+          object = "${config.system.build.modulesClosure}/lib";
+          symlink = "/lib";
+        }
+        {
+          object = "${pkgs.kmod-blacklist-ubuntu}/modprobe.conf";
+          symlink = "/etc/modprobe.d/ubuntu.conf";
+        }
+        {
+          object = config.environment.etc."modprobe.d/nixos.conf".source;
+          symlink = "/etc/modprobe.d/nixos.conf";
+        }
+        {
+          object = pkgs.kmod-debian-aliases;
+          symlink = "/etc/modprobe.d/debian.conf";
+        }
+      ]
+      ++ lib.optionals config.services.multipath.enable [
+        {
+          object =
+            pkgs.runCommand "multipath.conf" {
+              src = config.environment.etc."multipath.conf".text;
+              preferLocalBuild = true;
+            } ''
+              target=$out
+              printf "$src" > $out
+              substituteInPlace $out \
+                --replace ${config.services.multipath.package}/lib ${extra-utils}/lib
+            '';
+          symlink = "/etc/multipath.conf";
+        }
+      ]
+      ++ lib.mapAttrsToList (symlink: options: {
+        inherit symlink;
+        object = options.source;
+      })
+      config.boot.initrd.extraFiles;
+  };
 in {
   options.system.nixos-core = {
-    enable = lib.mkEnableOption "nixos-core multi-call binary";
-    package = lib.mkOption {
-      type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      defaultText = lib.literalExpression "self.packages.\${pkgs.stdenv.hostPlatform.system}.default";
-      description = "The nixos-core package.";
+    enable = mkEnableOption "nixos-core multi-call binary";
+    package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} ["nixos-core"] {};
+
+    # Resurface some of the hard-coded checks so that the user can selectively override
+    # behaviour in non-standard environments. This is deliberately *not* named `settings`
+    # to leave room for a future settings option in case we decide to set that up.
+    components = {
+      extraUtilsCommand.enable =
+        mkEnableOption ""
+        // {
+          default = !config.boot.initrd.systemd.enable;
+          defaultText = literalExpression "!config.boot.initrd.systemd.enable";
+          description = "Whether to place nixos-core in extraUtils for the stage-1 wrapper";
+        };
+
+      bootStage1 = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = !config.boot.initrd.systemd.enable;
+            defaultText = literalExpression "!config.boot.initrd.systemd.enable";
+            description = ''
+              Whether to create {option} `system.build.bootStage1` wrapper with `nixos-core` available.
+
+              ::: {.note}
+
+              This option conflicts with NixOS' systemd-in-stage1 option, so it is
+              **generally not recommended** to try and override this option. It may
+              come in handy for Systemd-less NixOS variants still relying on Bash in stage 1.
+
+              :::
+            '';
+          };
+
+        package = mkOption {
+          type = package;
+          default = bootStage1;
+          description = "";
+          readOnly = true; # we can't handle a modified package
+        };
+      };
+
+      initialRamdisk = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = !config.boot.initrd.systemd.enable;
+            defaultText = literalExpression "!config.boot.initrd.systemd.enable";
+            description = ''
+              Whether to override {optiion}`system.build.initialRamdisk` with
+
+
+            '';
+          };
+
+        package = mkOption {
+          type = package;
+          default = initialRamdisk;
+          description = "";
+          readOnly = true; # we can't handle a modified package
+        };
+      };
+
+      bootloaderInstaller = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = config.boot.loader.initScript.enable;
+            defaultText = literalExpression "config.boot.loader.initScript.enable";
+            description = "Whether to replace legacy bootloader installer with nixos-core";
+          };
+
+        package = mkOption {
+          type = package;
+          default = "${lib.getExe' cfg.package "init-script-builder"}";
+          defaultText = literalExpression "${lib.getExe' cfg.package "init-script-builder"}";
+          description = "The bootloader installer package to use";
+        };
+      };
+
+      etcActivation = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = !config.system.etc.overlay.enable;
+            defaultText = literalExpression "!config.system.etc.overlay.enable";
+            description = "Whether to replace the {file}`/etc` activation script with nixos-core";
+          };
+
+        script = mkOption {
+          type = lines;
+          default = ''
+            echo "setting up /etc..."
+            ${lib.getExe' cfg.package "setup-etc"} ${config.system.build.etc}/etc
+          '';
+          description = "Script contents passed to {option}`system.build.etcActivationCommands`";
+        };
+      };
+
+      userGroupsActivation = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = !config.systemd.sysusers.enable;
+            defaultText = literalExpression "!config.systemd.sysusers.enable";
+            description = "Whether to create users and groups with nixos-core";
+          };
+
+        script = mkOption {
+          type = lines;
+          default = ''
+            install -m 0700 -d /root
+            install -m 0755 -d /home
+            ${lib.getExe' cfg.package "update-users-groups"} ${usersSpec}
+          '';
+          description = "Script contents passed to the user activation script";
+        };
+      };
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = mkIf cfg.enable {
     # Legacy initrd only: add nixos-core to extraUtils so stage-1 wrapper can exec it,
     # and override bootStage1/initialRamdisk with our wrapper.
     # With the systemd initrd stage-1 is handled by systemd; these don't apply.
-    boot.initrd.extraUtilsCommands = lib.mkIf (!config.boot.initrd.systemd.enable) ''
-      copy_bin_and_libs ${cfg.package}/bin/nixos-core
+    boot.initrd.extraUtilsCommands = mkIf cfg.components.extraUtilsCommand.enable ''
+      copy_bin_and_libs ${lib.getexe' cfg.package "nixos-core"}
     '';
 
-    system.build.bootStage1 = lib.mkIf (!config.boot.initrd.systemd.enable) (lib.mkForce bootStage1);
+    system = {
+      build = {
+        # Stage 1
+        bootStage1 = mkIf cfg.components.bootStage1 (mkForce cfg.components.bootStage1.package);
 
-    # Rebuild the initrd with our bootStage1 as /init.
-    # Mirrors the contents list from nixpkgs' stage-1.nix.
-    system.build.initialRamdisk = lib.mkIf (!config.boot.initrd.systemd.enable) (lib.mkForce (
-      pkgs.makeInitrd {
-        name = "initrd-${config.boot.kernelPackages.kernel.name or "kernel"}";
-        inherit (config.boot.initrd) compressor compressorArgs prepend;
-        contents =
-          [
-            {
-              object = bootStage1;
-              symlink = "/init";
-            }
-            {
-              object = "${config.system.build.modulesClosure}/lib";
-              symlink = "/lib";
-            }
-            {
-              object = "${pkgs.kmod-blacklist-ubuntu}/modprobe.conf";
-              symlink = "/etc/modprobe.d/ubuntu.conf";
-            }
-            {
-              object = config.environment.etc."modprobe.d/nixos.conf".source;
-              symlink = "/etc/modprobe.d/nixos.conf";
-            }
-            {
-              object = pkgs.kmod-debian-aliases;
-              symlink = "/etc/modprobe.d/debian.conf";
-            }
-          ]
-          ++ lib.optionals config.services.multipath.enable [
-            {
-              object =
-                pkgs.runCommand "multipath.conf" {
-                  src = config.environment.etc."multipath.conf".text;
-                  preferLocalBuild = true;
-                } ''
-                  target=$out
-                  printf "$src" > $out
-                  substituteInPlace $out \
-                    --replace ${config.services.multipath.package}/lib ${extra-utils}/lib
-                '';
-              symlink = "/etc/multipath.conf";
-            }
-          ]
-          ++ lib.mapAttrsToList (symlink: options: {
-            inherit symlink;
-            object = options.source;
-          })
-          config.boot.initrd.extraFiles;
-      }
-    ));
+        # Rebuild the initrd with our bootStage1 as /init. This, at the cost of risking getting
+        # out of sync, mirrors the contents list from nixpkgs' stage-1.nix.
+        initialRamdisk = mkIf cfg.components.initialRamdisk.enable (mkForce cfg.components.initialRamdisk.package);
 
-    system.build.bootStage2 = lib.mkIf (!config.boot.initrd.systemd.enable) (lib.mkForce bootStage2);
+        # Stage 2
+        bootStage2 = mkIf (!config.boot.initrd.systemd.enable) (mkForce bootStage2);
 
-    system.build.installBootLoader = lib.mkIf config.boot.loader.initScript.enable (
-      lib.mkForce "${cfg.package}/bin/init-script-builder"
-    );
+        # Bootloader Installer
+        installBootLoader = mkIf cfg.components.bootloaderInstaller.enable (mkForce cfg.components.bootloaderInstaller.package);
 
-    system.activationScripts.users = lib.mkIf (!config.systemd.sysusers.enable) (lib.mkForce {
-      supportsDryActivation = true;
-      text = ''
-        install -m 0700 -d /root
-        install -m 0755 -d /home
-        ${cfg.package}/bin/update-users-groups ${usersSpec}
-      '';
-    });
+        # /etc Activation
+        etcActivationCommands = mkIf cfg.components.etcActivation.enable (mkForce cfg.components.etcActivation.script);
+      };
 
-    system.build.etcActivationCommands = lib.mkIf (!config.system.etc.overlay.enable) (lib.mkForce ''
-      echo "setting up /etc..."
-      ${cfg.package}/bin/setup-etc ${config.system.build.etc}/etc
-    '');
+      activationScripts.users = mkIf cfg.components.userGroupsActivation.enable (mkForce {
+        supportsDryActivation = true;
+        text = cfg.components.userGroupsActivation.script;
+      });
+    };
   };
 }

@@ -1,0 +1,24 @@
+name: VM Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  vm-tests:
+    name: VM Tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [boot, etc, users]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Build ${{ matrix.test }} test
+        run: nix build .#checks.x86_64-linux.${{ matrix.test }} -Lv
