@@ -130,7 +130,7 @@ $ nix build .#checks.x86_64-linux.boot
 ```
 
 You can find the available NixOS VM tests in the [nix/vm-tests](./nix/vm-tests/)
-directory. If you're adding new features, you should ad a new test component or
+directory. If you're adding new features, you should add a new test component or
 some subtests that verify that your code works exactly as expected.
 
 ## License
