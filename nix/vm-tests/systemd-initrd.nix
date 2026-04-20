@@ -3,7 +3,7 @@
   nixosModule,
   testCommons,
 }:
-mkTest {
+mkTest ({nodes, ...}: {
   name = "nixos-core-systemd-initrd";
 
   nodes.machine = {
@@ -53,5 +53,28 @@ mkTest {
       machine.succeed("test -f /etc/passwd")
       machine.succeed("test -f /etc/shadow")
       machine.succeed("stat -c '%a' /etc/shadow | grep -qx 640")
+
+    with subtest("current-system points to exact toplevel"):
+      machine.succeed(
+        "test \"$(readlink /run/current-system)\" = \"${nodes.machine.system.build.toplevel}\""
+      )
+
+    with subtest("firmware search path written"):
+      machine.succeed("test -f /sys/module/firmware_class/parameters/path")
+      machine.succeed(
+        "grep -qF /lib/firmware /sys/module/firmware_class/parameters/path"
+      )
+
+    with subtest("modprobe binary written to /proc/sys/kernel/modprobe"):
+      machine.succeed(
+        "grep -qF modprobe /proc/sys/kernel/modprobe"
+      )
+
+    with subtest("FHS compatibility symlinks present"):
+      machine.succeed("test -L /usr/bin/env")
+      machine.succeed("test -L /bin/sh")
+
+    with subtest("systemd state passing from initrd"):
+      machine.succeed("systemd-analyze | grep -q '(initrd)'")
   '';
-}
+})
