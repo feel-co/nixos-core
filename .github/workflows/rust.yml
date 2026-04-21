@@ -27,7 +27,7 @@ jobs:
         # lints track what contributors actually have installed.
         uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rustfmt
+          components: rustfmt miri
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -43,3 +43,8 @@ jobs:
 
       - name: Clippy lints
         run: cargo +stable clippy --all-targets -- -D warnings
+
+      - name: Run Miri
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check"
+        run: cargo +nightly miri test
