@@ -60,5 +60,13 @@ mkTest {
       machine.succeed("test -f /etc/hostid")
       machine.succeed("test $(wc -c < /etc/hostid) -eq 4")
       machine.succeed("od -An -tx1 /etc/hostid | tr -d ' \\n' | grep -qx 'bebafeca'")
+
+    with subtest("stage1 wipes environment before exec /init"):
+      # Upstream pivots with `exec env -i` so LD_LIBRARY_PATH=@extraUtils@/lib
+      # doesn't leak into PID 1 and break systemd's libseccomp dlopen.
+      machine.fail("tr '\\0' '\\n' < /proc/1/environ | grep -q '^LD_LIBRARY_PATH='")
+      # Without seccomp, systemd drops the service PATH that resolves
+      # relative ExecStart names, so tmpfiles-setup and friends 203/EXEC.
+      machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
   '';
 }

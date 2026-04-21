@@ -147,6 +147,13 @@ in
         machine.succeed("grep -qE '^subuser:[0-9]+:65536$' /etc/subuid")
         machine.succeed("grep -qE '^subuser:[0-9]+:65536$' /etc/subgid")
 
+      with subtest("uid/gid maps written as single-line JSON"):
+        # Upstream perl's `decode_json(read_file(...))` runs in list context
+        # and only sees the first line, so pretty-printed JSON breaks any
+        # round-trip through the perl script. Match its canonical output.
+        for f in ("/var/lib/nixos/uid-map", "/var/lib/nixos/gid-map"):
+            machine.succeed(f"test $(wc -l < {f}) -le 1")
+
       with subtest("mutableUsers=false reverts external password changes"):
         machine.succeed("sed -i 's/^immutableuser:!:/immutableuser:changed:/' /etc/shadow")
         machine.succeed("grep '^immutableuser:' /etc/shadow | cut -d: -f2 | grep -qx changed")
