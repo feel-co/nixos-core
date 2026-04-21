@@ -101,7 +101,7 @@ fn run_and_handoff_inner(args: &cli::Args) -> ! {
   // (IN_NIXOS_SYSTEMD_STAGE1), we must exit cleanly. Systemd's
   // initrd-switch-root service handles the switch-root and the systemd exec.
   // Exec-ing systemd from within the chroot would be wrong.
-  if std::env::var("IN_NIXOS_SYSTEMD_STAGE1").unwrap_or_default() == "true" {
+  if std::env::var("IN_NIXOS_SYSTEMD_STAGE1").is_ok_and(|var| var == "true") {
     log::info!(
       "stage-2-init: systemd initrd path; returning to initrd-switch-root"
     );
