@@ -151,6 +151,11 @@ self: {
         export HOST_ID=${lib.escapeShellArg config.networking.hostId}
       ''}
 
+      export DEVICE_MANAGER=udev
+      export UDEV_BINARY=${lib.escapeShellArg "${extra-utils}/bin/systemd-udevd"}
+      export UDEVADM_BINARY=${lib.escapeShellArg "${extra-utils}/bin/udevadm"}
+      export LINK_UNITS_DEST=/etc/systemd/network
+
       exec ${extra-utils}/bin/nixos-core stage-1-init
     '';
   };
@@ -175,7 +180,13 @@ self: {
         else "false"
       }
       export STAGE2_GREETING=${lib.escapeShellArg "<<< ${config.system.nixos.distroName} Stage 2 >>>"}
-      exec ${cfg.package}/bin/stage-2-init
+      ${lib.optionalString cfg.components.nixosInitCompat.enable ''
+        export FIRMWARE_PATH=${lib.escapeShellArg "${config.hardware.firmware}/lib/firmware"}
+        export MODPROBE_BINARY=${lib.escapeShellArg "${pkgs.kmod}/bin/modprobe"}
+        export ENV_BINARY=${lib.escapeShellArg config.environment.usrbinenv}
+        export SH_BINARY=${lib.escapeShellArg config.environment.binsh}
+      ''}
+      exec ${cfg.package}/bin/stage-2-init${lib.optionalString cfg.components.nixosInitCompat.enable " --setup-firmware --setup-modprobe --setup-fhs --create-current-system"}
     '';
   };
 
@@ -298,6 +309,31 @@ in {
         };
       };
 
+      bootStage2 = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = true;
+            description = ''
+              Whether to replace {option}`system.build.bootStage2` with nixos-core's
+              `stage-2-init`.
+
+              Under a systemd initrd, nixpkgs' `initrd-nixos-activation.service`
+              calls the resulting `prepare-root` via `chroot /sysroot`.
+
+              `stage-2-init` detects `IN_NIXOS_SYSTEMD_STAGE1=true` and exits
+              after activation instead of `exec`-ing systemd.
+            '';
+          };
+
+        package = mkOption {
+          type = package;
+          default = bootStage2;
+          description = "";
+          readOnly = true;
+        };
+      };
+
       initialRamdisk = {
         enable =
           mkEnableOption ""
@@ -374,6 +410,21 @@ in {
           description = "Script contents passed to the user activation script";
         };
       };
+
+      nixosInitCompat = {
+        enable =
+          mkEnableOption ""
+          // {
+            default = config.boot.initrd.systemd.enable;
+            defaultText = literalExpression "config.boot.initrd.systemd.enable";
+            description = ''
+              Whether to wire nixos-init-compatible setup into stage2 for the
+              systemd-initrd path. When enabled, stage2 receives flags to set up
+              `/run/current-system`, the firmware search path, the modprobe
+              binary pointer, and FHS compatibility symlinks.
+            '';
+          };
+      };
     };
   };
 
@@ -388,14 +439,14 @@ in {
     system = {
       build = {
         # Stage 1
-        bootStage1 = mkIf cfg.components.bootStage1 (mkForce cfg.components.bootStage1.package);
+        bootStage1 = mkIf cfg.components.bootStage1.enable (mkForce cfg.components.bootStage1.package);
 
         # Rebuild the initrd with our bootStage1 as /init. This, at the cost of risking getting
         # out of sync, mirrors the contents list from nixpkgs' stage-1.nix.
         initialRamdisk = mkIf cfg.components.initialRamdisk.enable (mkForce cfg.components.initialRamdisk.package);
 
         # Stage 2
-        bootStage2 = mkIf (!config.boot.initrd.systemd.enable) (mkForce bootStage2);
+        bootStage2 = mkIf cfg.components.bootStage2.enable (mkForce cfg.components.bootStage2.package);
 
         # Bootloader Installer
         installBootLoader = mkIf cfg.components.bootloaderInstaller.enable (mkForce cfg.components.bootloaderInstaller.package);

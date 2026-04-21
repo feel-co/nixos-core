@@ -131,11 +131,26 @@ pub fn run(args: &Args) -> Result<()> {
   // anything they spawn also land in /dev/kmsg (or /run/log) - matches the
   // `exec > >(tee ...) 2>&1` block in stage-2-init.sh:110-122. The shell
   // skips this in the systemd-stage-1 path; we do the same.
-  let saved = if in_systemd_stage1 {
+  //
+  // StdioGuard restores fds 1/2 on drop, covering both the success path and
+  // any error path, so systemd always inherits a real console fd.
+  // capture_stdio spawns /bin/sh, which does not exist before the activation
+  // script runs. Treat failure as non-fatal: logging degrades but boot must
+  // not be blocked on a diagnostic feature.
+  let _stdio = StdioGuard(if in_systemd_stage1 {
     None
   } else {
-    capture_stdio(&log_dest).context("Failed to set up stdio capture")?
-  };
+    match capture_stdio(&log_dest) {
+      Ok(guard) => guard,
+      Err(e) => {
+        log_message(
+          log_dest.as_deref(),
+          &format!("stage-2-init: warning: stdio capture unavailable: {e:#}"),
+        );
+        None
+      },
+    }
+  });
 
   run_activation_script(&args.system_config, &log_dest)
     .context("Activation script failed")?;
@@ -153,12 +168,6 @@ pub fn run(args: &Args) -> Result<()> {
     "stage-2-init: activation complete, starting systemd",
   );
 
-  // Restore console fds before the exec so systemd inherits the terminal,
-  // not the tee pipe. Matches stage-2-init.sh's `exec 1>&$logOutFd` restore.
-  if let Some(saved) = saved {
-    restore_stdio(saved);
-  }
-
   Ok(())
 }
 
@@ -166,6 +175,18 @@ pub fn run(args: &Args) -> Result<()> {
 struct SavedStdio {
   stdout: RawFd,
   stderr: RawFd,
+}
+
+// Restores fds 1 and 2 on drop so error paths don't leave stdout/stderr
+// pointing at the tee pipe.
+struct StdioGuard(Option<SavedStdio>);
+
+impl Drop for StdioGuard {
+  fn drop(&mut self) {
+    if let Some(saved) = self.0.take() {
+      restore_stdio(saved);
+    }
+  }
 }
 
 /// Redirect fds 1 and 2 through a `tee`-like helper. Returns the saved
@@ -513,18 +534,19 @@ fn setup_nix_store(
     );
   }
 
-  // Apply mount options if /nix/store is a separate mount
-  if is_mounted(store_path) {
-    let desired_opts: Vec<String> = args
-      .nix_store_mount_opts
-      .split(',')
-      .map(|s| s.trim().to_string())
-      .filter(|s| !s.is_empty())
-      .collect();
+  // Apply mount options *unconditionally*
+  // When /nix/store is not already a separate mountpoint (e.g., systemd initrd
+  // where only the root fs is mounted), apply_nix_store_mount_opts treats all
+  // desired options as missing and creates the bind mount itself.
+  let store_opts: Vec<String> = args
+    .nix_store_mount_opts
+    .split(',')
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .collect();
 
-    apply_nix_store_mount_opts(store_path, &desired_opts, log_dest)
-      .context("Failed to apply /nix/store mount options")?;
-  }
+  apply_nix_store_mount_opts(store_path, &store_opts, log_dest)
+    .context("Failed to apply /nix/store mount options")?;
 
   Ok(())
 }
@@ -534,7 +556,10 @@ fn apply_nix_store_mount_opts(
   desired_opts: &[String],
   log_dest: &Option<std::path::PathBuf>,
 ) -> Result<()> {
-  let current_opts = get_mount_options(store_path)?;
+  // Fall back to empty when the path has no separate mountpoint entry (e.g.
+  // it sits on the root fs). Treating all desired options as missing causes
+  // the bind+remount below to apply them.
+  let current_opts = get_mount_options(store_path).unwrap_or_default();
 
   fn opt_to_flag(opt: &str) -> Option<MsFlags> {
     match opt {
