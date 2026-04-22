@@ -12,9 +12,11 @@ name = "setup_etc"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow.workspace = true
-clap.workspace   = true
-libc.workspace   = true
+anyhow.workspace    = true
+clap.workspace      = true
+libc.workspace      = true
+serde_json.workspace = true
+smfh-core.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
