@@ -979,9 +979,9 @@ fn hash_password(password: &str) -> Result<String> {
   // SHA-512 crypt salt: 8 characters from the crypt(3) alphabet. Reading 8
   // bytes from /dev/urandom and taking the low 6 bits gives a uniform pick
   // over a 64-char alphabet, which matches what glibc's crypt_gensalt does.
-  // sha-crypt's `sha512_simple` would do salt generation + encoding on its
-  // own but pulls `rand`; we use the low-level `sha512_crypt_b64` helper
-  // with our own salt so the rand graph stays out.
+  // sha-crypt's high-level API would do salt generation on its own but pulls
+  // `rand`; we generate the salt via getrandom(2) and use the low-level
+  // `sha512_crypt` helper directly so the rand graph stays out.
   const CHARSET: &[u8; 64] =
     b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -1003,14 +1003,52 @@ fn hash_password(password: &str) -> Result<String> {
     .iter()
     .map(|b| CHARSET[(*b as usize) & 0x3F] as char)
     .collect();
-  let encoded = sha_crypt::sha512_crypt_b64(
-    password.as_bytes(),
-    salt.as_bytes(),
-    &sha_crypt::Sha512Params::new(sha_crypt::ROUNDS_DEFAULT)
-      .map_err(|e| anyhow::anyhow!("sha-crypt params: {e:?}"))?,
-  )
-  .map_err(|e| anyhow::anyhow!("sha-crypt hash: {e:?}"))?;
+  let params = sha_crypt::Params::new(sha_crypt::Params::RECOMMENDED_ROUNDS)
+    .map_err(|e| anyhow::anyhow!("sha-crypt params: {e:?}"))?;
+  let hash =
+    sha_crypt::sha512_crypt(password.as_bytes(), salt.as_bytes(), params);
+  let encoded = sha512_crypt_b64(&hash);
   Ok(format!("$6${salt}${encoded}"))
+}
+
+// sha-crypt 0.6 removed sha512_crypt_b64, but introduces some fixes that we
+// would rather get.
+fn sha512_crypt_b64(raw: &[u8; 64]) -> String {
+  // SHA-512-crypt transposition table (sha-crypt spec, section 22).
+  // Reorders the raw sha512_crypt bytes before base64-encoding so that the
+  // resulting string matches the $6$ format produced by glibc crypt(3).
+  const T: [usize; 64] = [
+    42, 21, 0, 1, 43, 22, 23, 2, 44, 45, 24, 3, 4, 46, 25, 26, 5, 47, 48, 27,
+    6, 7, 49, 28, 29, 8, 50, 51, 30, 9, 10, 52, 31, 32, 11, 53, 54, 33, 12, 13,
+    55, 34, 35, 14, 56, 57, 36, 15, 16, 58, 37, 38, 17, 59, 60, 39, 18, 19, 61,
+    40, 41, 20, 62, 63,
+  ];
+  const ALPHA: &[u8; 64] =
+    b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+  let mut t = [0u8; 64];
+  for (i, &ti) in T.iter().enumerate() {
+    t[i] = raw[ti];
+  }
+
+  let enc = |v: u8| ALPHA[(v & 0x3F) as usize] as char;
+  let mut out = String::with_capacity(86);
+  for chunk in t.chunks(3) {
+    match chunk {
+      [b0, b1, b2] => {
+        out.push(enc(*b0));
+        out.push(enc((*b0 >> 6) | (*b1 << 2)));
+        out.push(enc((*b1 >> 4) | (*b2 << 4)));
+        out.push(enc(*b2 >> 2));
+      },
+      [b0] => {
+        out.push(enc(*b0));
+        out.push(enc(*b0 >> 6));
+      },
+      _ => unreachable!(),
+    }
+  }
+  out
 }
 
 fn dry_print(is_dry: bool, action: &str, dry_action: &str, target: &str) {
