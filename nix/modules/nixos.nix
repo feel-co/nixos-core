@@ -270,6 +270,17 @@ in {
     enable = mkEnableOption "nixos-core multi-call binary";
     package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} ["nixos-core"] {};
 
+    stateDir = mkOption {
+      type = lib.types.str;
+      default = "/var/lib/nixos";
+      example = "/run/nixos";
+      description = ''
+        Directory used by nixos-core to store runtime state (etc manifest,
+        uid/gid maps, etc.). Exported as {env}`NIXOS_CORE_STATE_DIR` to activation
+        scripts. Override on NixOS variants that use a different state path.
+      '';
+    };
+
     # Resurface some of the hard-coded checks so that the user can selectively override
     # behaviour in non-standard environments. This is deliberately *not* named `settings`
     # to leave room for a future settings option in case we decide to set that up.
@@ -289,7 +300,7 @@ in {
             default = !config.boot.initrd.systemd.enable;
             defaultText = literalExpression "!config.boot.initrd.systemd.enable";
             description = ''
-              Whether to create {option} `system.build.bootStage1` wrapper with `nixos-core` available.
+              Whether to create {option}`system.build.bootStage1` wrapper with `nixos-core` available.
 
               ::: {.note}
 
@@ -385,6 +396,7 @@ in {
           type = lines;
           default = ''
             echo "setting up /etc..."
+            export NIXOS_CORE_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
             ${lib.getExe' cfg.package "setup-etc"} ${config.system.build.etc}/etc
           '';
           description = "Script contents passed to {option}`system.build.etcActivationCommands`";
@@ -405,6 +417,7 @@ in {
           default = ''
             install -m 0700 -d /root
             install -m 0755 -d /home
+            export NIXOS_CORE_STATE_DIR=${lib.escapeShellArg cfg.stateDir}
             ${lib.getExe' cfg.package "update-users-groups"} ${usersSpec}
           '';
           description = "Script contents passed to the user activation script";
