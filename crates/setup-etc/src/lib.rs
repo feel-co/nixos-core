@@ -18,7 +18,13 @@ struct Args {
 }
 
 const ETC_STATIC: &str = "/etc/static";
-const ETC_MANIFEST: &str = "/var/lib/nixos/etc-manifest.json";
+const ETC_MANIFEST_DEFAULT: &str = "/var/lib/nixos/etc-manifest.json";
+const ETC_MANIFEST_ENV: &str = "NIXOS_CORE_STATE_DIR";
+
+fn get_etc_manifest() -> PathBuf {
+  let state_dir = std::env::var(ETC_MANIFEST_ENV).unwrap_or_else(|_| ETC_MANIFEST_DEFAULT.to_string());
+  PathBuf::from(state_dir).join("etc-manifest.json")
+}
 
 /// Apply /etc files from the given nix store path, updating /etc/static and all
 /// derived symlinks.
@@ -56,8 +62,9 @@ pub fn run(args: &[String]) -> Result<()> {
   .context("Failed to serialise manifest")?;
 
   // Step 5: Write to a sibling temp path so the rename in step 7 is atomic.
-  let manifest_path = Path::new(ETC_MANIFEST);
-  let manifest_tmp = PathBuf::from(format!("{ETC_MANIFEST}.new"));
+  let manifest_path = get_etc_manifest();
+  let manifest_tmp = PathBuf::from(format!("{}.new", manifest_path.display()));
+  fs::create_dir_all(manifest_path.parent().unwrap())?;
   fs::write(&manifest_tmp, &manifest_content)
     .context("Failed to write manifest")?;
 
@@ -71,7 +78,7 @@ pub fn run(args: &[String]) -> Result<()> {
       .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {e:?}"))?;
 
     new_manifest
-      .diff(manifest_path, "", true)
+      .diff(&manifest_path, "", true)
       .map_err(|e| anyhow::anyhow!("Failed to apply manifest diff: {e:?}"))?;
 
     // Step 7: Commit the new manifest atomically.
