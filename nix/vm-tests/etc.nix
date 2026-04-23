@@ -7,90 +7,116 @@
 }:
 mkTest ({nodes, ...}: {
   name = "nixos-core-etc";
+  nodes = {
+    # Two nodes:
+    #
+    # - `machine` boots straight under nixos-core's setup-etc and exercises
+    #   pass-through symlinks, copied files, source entries, direct symlinks,
+    #   and idempotent re-activation.
+    #
+    # - `perl` boots under upstream's setup-etc.pl (nixos-core's etc activation
+    #   disabled), then switches into a specialisation that re-enables
+    #   nixos-core's setup-etc. Verifies the Perl-to-nixos-core migration:
+    #   /etc/.clean is replayed, stale entries are dropped, surviving entries
+    #   are preserved.
+    #
+    # TODO: see if we can do reboot subtests. As far as I understand vm tests run
+    # with `boot.loader.grub.enable = false`, so a `shutdown` + `start` cycle
+    # reboots the disk image into the same oplevel the test was built with. So
+    # i the end there is no bootloader to redirect into the post-switch generation.
+    # The boot test covers a fresh nixos-core boot end-to-end, which is the best
+    # I can do :/
+    machine = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot.loader.grub.enable = false;
 
-  # Two nodes:
-  #
-  # - `machine` boots straight under nixos-core's setup-etc and exercises
-  #   pass-through symlinks, copied files, source entries, direct symlinks,
-  #   and idempotent re-activation.
-  #
-  # - `perl` boots under upstream's setup-etc.pl (nixos-core's etc activation
-  #   disabled), then switches into a specialisation that re-enables
-  #   nixos-core's setup-etc. Verifies the Perl-to-nixos-core migration:
-  #   /etc/.clean is replayed, stale entries are dropped, surviving entries
-  #   are preserved.
-  #
-  # TODO: see if we can do reboot subtests. As far as I understand vm tests run
-  # with `boot.loader.grub.enable = false`, so a `shutdown` + `start` cycle
-  # reboots the disk image into the same oplevel the test was built with. So
-  # i the end there is no bootloader to redirect into the post-switch generation.
-  # The boot test covers a fresh nixos-core boot end-to-end, which is the best
-  # I can do :/
-  nodes.machine = {
-    imports = [nixosModule testCommons];
-    system.nixos-core.enable = true;
-    boot.loader.grub.enable = false;
+      environment.etc = {
+        "nixos-core-marker".text = "nixos-core-works";
 
-    environment.etc = {
-      "nixos-core-marker".text = "nixos-core-works";
+        "nixos-core-secret" = {
+          text = "sensitive";
+          mode = "0600";
+        };
 
-      "nixos-core-secret" = {
-        text = "sensitive";
-        mode = "0600";
-      };
+        "nixos-core-source".source = writeText "etc-source" "from-source";
 
-      "nixos-core-source".source = writeText "etc-source" "from-source";
-
-      "nixos-core-direct" = {
-        source = writeText "etc-direct" "direct-content";
-        mode = "direct-symlink";
-      };
-    };
-  };
-
-  nodes.perl = {
-    imports = [nixosModule testCommons];
-
-    # Bare `false` wins over the option's default (priority 1500) without
-    # using mkForce, so the specialisation can mkForce true cleanly.
-    system.nixos-core.enable = true;
-    system.nixos-core.components.etcActivation.enable = false;
-    boot.loader.grub.enable = false;
-
-    environment.etc = {
-      "perl-migration-marker".text = "from-perl";
-
-      "perl-migration-secret" = {
-        text = "secret-content";
-        mode = "0600";
-      };
-
-      "perl-migration-direct" = {
-        source = writeText "perl-migration-direct-src" "direct-from-perl";
-        mode = "direct-symlink";
-      };
-
-      # Stale entries: present in the Perl-managed gen, dropped in the
-      # nixos-core specialisation. The migration must remove both.
-      "perl-migration-stale-symlink".text = "stale-symlink";
-
-      "perl-migration-stale-copy" = {
-        text = "stale-copy";
-        mode = "0640";
+        "nixos-core-direct" = {
+          source = writeText "etc-direct" "direct-content";
+          mode = "direct-symlink";
+        };
       };
     };
 
-    specialisation.nixos-core-etc.configuration = {
-      system.nixos-core.components.etcActivation.enable = lib.mkForce true;
-      environment.etc."perl-migration-stale-symlink".enable = lib.mkForce false;
-      environment.etc."perl-migration-stale-copy".enable = lib.mkForce false;
+    # State machine. Ha ha.
+    state = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot.loader.grub.enable = false;
+
+      # Use a custom state directory to verify NIXOS_CORE_STATE_DIR works.
+      environment.variables.NIXOS_CORE_STATE_DIR = "/var/lib/custom-nixos";
+
+      environment.etc = {
+        "custom-state-marker".text = "custom-state-works";
+        "custom-state-secret" = {
+          text = "custom-secret";
+          mode = "0600";
+        };
+      };
+    };
+
+    perl = {
+      imports = [nixosModule testCommons];
+
+      # Bare `false` wins over the option's default (priority 1500) without
+      # using mkForce, so the specialisation can mkForce true cleanly.
+      system.nixos-core.enable = true;
+      system.nixos-core.components.etcActivation.enable = false;
+      boot.loader.grub.enable = false;
+
+      environment.etc = {
+        "perl-migration-marker".text = "from-perl";
+
+        "perl-migration-secret" = {
+          text = "secret-content";
+          mode = "0600";
+        };
+
+        "perl-migration-direct" = {
+          source = writeText "perl-migration-direct-src" "direct-from-perl";
+          mode = "direct-symlink";
+        };
+
+        # Stale entries: present in the Perl-managed gen, dropped in the
+        # nixos-core specialisation. The migration must remove both.
+        "perl-migration-stale-symlink".text = "stale-symlink";
+
+        "perl-migration-stale-copy" = {
+          text = "stale-copy";
+          mode = "0640";
+        };
+      };
+
+      specialisation.nixos-core-etc.configuration = {
+        system.nixos-core.components.etcActivation.enable = lib.mkForce true;
+        environment.etc."perl-migration-stale-symlink".enable = lib.mkForce false;
+        environment.etc."perl-migration-stale-copy".enable = lib.mkForce false;
+      };
     };
   };
 
   testScript = ''
     start_all()
     machine.wait_for_unit("multi-user.target")
+    state.wait_for_unit("multi-user.target")
     perl.wait_for_unit("multi-user.target")
+
+    with subtest("custom state directory respects NIXOS_CORE_STATE_DIR"):
+      custom_state.succeed("test -f /var/lib/custom-nixos/etc-manifest.json")
+      custom_state.succeed("grep -q custom-state-marker /var/lib/custom-nixos/etc-manifest.json")
+      custom_state.succeed("grep -q custom-state-secret /var/lib/custom-nixos/etc-manifest.json")
+      custom_state.succeed("test ! -f /var/lib/nixos/etc-manifest.json")
 
     with subtest("text entry symlinked through /etc/static"):
       machine.succeed("grep -qx nixos-core-works /etc/nixos-core-marker")
