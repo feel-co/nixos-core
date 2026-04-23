@@ -55,13 +55,20 @@ mkTest {
       machine.succeed("readlink /etc/nixos-core-direct | grep -qv /etc/static")
 
     with subtest("infrastructure files written"):
-      machine.succeed("test -f /etc/.clean")
+      machine.succeed("test -f /var/lib/nixos/etc-manifest.json")
       machine.succeed("test -f /etc/NIXOS")
+
+    with subtest("manifest contains expected entries"):
+      machine.succeed("grep -q nixos-core-marker /var/lib/nixos/etc-manifest.json")
+      machine.succeed("grep -q nixos-core-secret /var/lib/nixos/etc-manifest.json")
+      machine.succeed("grep -q nixos-core-source /var/lib/nixos/etc-manifest.json")
+      machine.succeed("grep -q nixos-core-direct /var/lib/nixos/etc-manifest.json")
 
     with subtest("idempotent re-activation"):
       machine.execute("/run/current-system/activate")
       machine.succeed("grep -qx nixos-core-works /etc/nixos-core-marker")
       machine.succeed("grep -qx sensitive /etc/nixos-core-secret")
       machine.succeed("stat -c '%a' /etc/nixos-core-secret | grep -qx 600")
+      machine.succeed("test -f /var/lib/nixos/etc-manifest.json")
   '';
 }
