@@ -30,6 +30,9 @@ pub fn run(args: &[String]) -> Result<()> {
   atomic_symlink(&etc, Path::new(ETC_STATIC))
     .context("Failed to update /etc/static symlink")?;
 
+  // Remove the legacy Perl-based state file; the smfh manifest supersedes it.
+  let _ = fs::remove_file("/etc/.clean");
+
   // Step 2: Remove dangling /etc symlinks that pointed into the old
   // /etc/static. Kept as a safety net during transition and for symlinks
   // created outside of the manifest.
@@ -54,19 +57,28 @@ pub fn run(args: &[String]) -> Result<()> {
   fs::write(&manifest_tmp, &manifest_content)
     .context("Failed to write manifest")?;
 
-  // Step 6: Load the new manifest and transition from the old one via diff.
-  // fallback=true means a missing or corrupt old manifest triggers a clean
-  // activate rather than an error.
-  let new_manifest = Manifest::read(&manifest_tmp, false)
-    .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {e:?}"))?;
+  // Steps 6–7: diff and commit; clean up the temp file on any failure so we
+  // do not leave a stale .new file behind.
+  let diff_result = (|| {
+    // Step 6: Load the new manifest and transition from the old one via diff.
+    // fallback=true means a missing or corrupt old manifest triggers a clean
+    // activate rather than an error.
+    let new_manifest = Manifest::read(&manifest_tmp, false)
+      .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {e:?}"))?;
 
-  new_manifest
-    .diff(manifest_path, "", true)
-    .map_err(|e| anyhow::anyhow!("Failed to apply manifest diff: {e:?}"))?;
+    new_manifest
+      .diff(manifest_path, "", true)
+      .map_err(|e| anyhow::anyhow!("Failed to apply manifest diff: {e:?}"))?;
 
-  // Step 7: Commit the new manifest atomically.
-  fs::rename(&manifest_tmp, manifest_path)
-    .context("Failed to commit manifest")?;
+    // Step 7: Commit the new manifest atomically.
+    fs::rename(&manifest_tmp, manifest_path).context("Failed to commit manifest")
+  })();
+
+  if let Err(ref e) = diff_result {
+    eprintln!("warning: manifest activation failed, cleaning up temp file: {e}");
+    let _ = fs::remove_file(&manifest_tmp);
+  }
+  diff_result?;
 
   // Step 8: Ensure the /etc/NIXOS tag file exists.
   create_nixos_tag()?;
@@ -107,9 +119,11 @@ fn build_etc_manifest(
     let target = etc_dir.join(relative);
     let relative_str = relative.to_string_lossy();
 
-    // Skip resolv.conf when running inside `nixos-enter`.
+    // Skip resolv.conf when running inside `nixos-enter` (bind-mounted by the
+    // host). Perl checks the variable as truthy; match that: any non-empty
+    // value means we are inside nixos-enter.
     if relative_str == "resolv.conf"
-      && std::env::var("IN_NIXOS_ENTER").unwrap_or_default() == "1"
+      && !std::env::var("IN_NIXOS_ENTER").unwrap_or_default().is_empty()
     {
       continue;
     }
