@@ -465,5 +465,20 @@ in {
         text = mkForce cfg.components.userGroupsActivation.script;
       };
     };
+
+    assertions = [
+      {
+        assertion = !config.system.nixos-init.enable;
+        message = "nixos-core supersedes nixos-init, and cannot be used alongside it";
+      }
+      {
+        assertion = !config.system.etc.overlay.enable;
+        message = "nixos-core cannot be used with system.etc.overlay.enable";
+      }
+      {
+        assertion = !config.services.userborn.enable && !config.systemd.sysusers.enable;
+        message = "nixos-core cannot be used with services.userborn.enable or systemd.sysusers.enable";
+      }
+    ];
   };
 }
