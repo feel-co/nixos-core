@@ -6,7 +6,7 @@ use std::{
   io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
   os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
   path::{Path, PathBuf},
-  process::Command,
+  process::{Command, ExitStatus, Stdio},
   thread,
   time::{Duration, Instant},
 };
@@ -963,13 +963,22 @@ fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
 
   // Handle special filesystem types
   match fs_info.fstype.as_str() {
-    "zfs" | "bcachefs" => {
-      // These are handled specially - they may already be mounted
+    "zfs" => {
+      // Mounted by the ZFS userspace tools.
       log_message(
         &format!("Skipping mount of {} (handled by kernel)", fs_info.fstype),
         true,
       );
       return Ok(());
+    },
+    "bcachefs" => {
+      // Mounted by the `mount.bcachefs` helper.
+      return mount_bcachefs(
+        &fs_info.device,
+        &fs_info.mountpoint,
+        &fs_info.options,
+        None,
+      );
     },
     "bind" => {
       // Bind mount
@@ -1037,6 +1046,89 @@ fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
   Ok(())
 }
 
+/// Invoke `mount.bcachefs <device> <mountpoint> [-o opts]`, retrying until
+/// `wait_timeout` on non-zero exits (where [`None`] = single attempt).
+fn mount_bcachefs(
+  device: &str,
+  mountpoint: &Path,
+  options: &[String],
+  wait_timeout: Option<Duration>,
+) -> Result<()> {
+  fs::create_dir_all(mountpoint)
+    .with_context(|| format!("Failed to create mountpoint: {mountpoint:?}"))?;
+
+  log_message(
+    &format!("Mounting bcachefs {device} at {mountpoint:?}"),
+    true,
+  );
+
+  let filtered_opts = options
+    .iter()
+    .map(String::as_str)
+    .filter(|o| !o.starts_with("x-") && !o.is_empty())
+    .collect::<Vec<_>>();
+
+  let run = || -> Result<(ExitStatus, String)> {
+    let mut cmd = Command::new("mount.bcachefs");
+    if !filtered_opts.is_empty() {
+      cmd.arg("-o").arg(filtered_opts.join(","));
+    }
+    cmd.arg(device).arg(mountpoint);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let out = cmd.output().context("Failed to spawn mount.bcachefs")?;
+    let mut combined = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !stdout.is_empty() {
+      if !combined.is_empty() {
+        combined.push('\n');
+      }
+      combined.push_str(&stdout);
+    }
+    Ok((out.status, combined.trim().to_string()))
+  };
+
+  let log_output = |output: &str| {
+    for line in output.lines() {
+      log_message(&format!("mount.bcachefs: {line}"), true);
+    }
+  };
+
+  let Some(timeout) = wait_timeout else {
+    let (status, output) = run()?;
+    if !status.success() {
+      log_output(&output);
+      bail!("mount.bcachefs {device} {mountpoint:?} exited with {status}");
+    }
+    return Ok(());
+  };
+
+  let start = Instant::now();
+  loop {
+    let (status, output) = run()?;
+    if status.success() {
+      return Ok(());
+    }
+    if start.elapsed() >= timeout {
+      log_output(&output);
+      bail!(
+        "mount.bcachefs {device} {mountpoint:?} failed after {:?}: last exit \
+         {}",
+        timeout,
+        status
+      );
+    }
+    log_message(
+      &format!(
+        "mount.bcachefs {device} not ready (exit {status}), retrying..."
+      ),
+      true,
+    );
+    log_output(&output);
+    thread::sleep(Duration::from_millis(500));
+  }
+}
+
 fn mount_root(
   cmdline: &KernelCmdline,
   target_root: &Path,
@@ -1045,18 +1137,18 @@ fn mount_root(
 ) -> Result<()> {
   log_message("Mounting root filesystem...", true);
 
-  // Prefer root= from cmdline; fall back to the "/" entry in fsInfo.
+  // fsInfo's "/" entry carries fstype/options, so read it even when `root=` is
+  // set on the cmdline, so we can still detect bcachefs below.
+  let fsinfo_root = fs_infos.iter().find(|f| f.mountpoint == Path::new("/"));
+
   let (root_device_owned, fsinfo_fstype): (String, Option<String>) =
     if let Some(r) = cmdline.root.as_ref() {
-      (r.clone(), None)
+      (r.clone(), fsinfo_root.map(|e| e.fstype.clone()))
     } else {
-      let entry = fs_infos
-        .iter()
-        .find(|f| f.mountpoint == Path::new("/"))
-        .context(
-          "No root= parameter specified on kernel command line and no '/' \
-           entry in fsInfo",
-        )?;
+      let entry = fsinfo_root.context(
+        "No root= parameter specified on kernel command line and no '/' entry \
+         in fsInfo",
+      )?;
       (entry.device.clone(), Some(entry.fstype.clone()))
     };
   let root_device = &root_device_owned;
@@ -1107,6 +1199,39 @@ fn mount_root(
       Some(cifs_opts),
     )
     .context("Failed to mount CIFS root")?;
+    return Ok(());
+  }
+
+  // In bcachefs, the filesystem UUID is fs-level, and not partition-level, so
+  // `/dev/disk/by-uuid/<uuid>` may never appear and multi-device paths never
+  // appear. Skip the udev-symlink wait and hand off to `mount.bcachefs`.
+  let early_fstype = cmdline
+    .get("rootfstype")
+    .cloned()
+    .or_else(|| fsinfo_fstype.clone());
+  if early_fstype.as_deref() == Some("bcachefs") {
+    let mut mount_opts: Vec<String> = cmdline
+      .get("rootflags")
+      .map(|s| s.split(',').map(String::from).collect())
+      .unwrap_or_default();
+    if let Some(e) = fsinfo_root {
+      for opt in &e.options {
+        if !mount_opts.contains(opt) {
+          mount_opts.push(opt.clone());
+        }
+      }
+    }
+    if !mount_opts.iter().any(|o| o == "ro" || o == "rw") {
+      mount_opts.push("rw".to_string());
+    }
+    dm.retrigger_block();
+    mount_bcachefs(
+      root_device,
+      target_root,
+      &mount_opts,
+      Some(Duration::from_secs(30)),
+    )?;
+    log_message(&format!("Root filesystem mounted at {target_root:?}"), true);
     return Ok(());
   }
 
