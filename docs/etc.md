@@ -15,28 +15,29 @@ sidecars, however, the way they track and apply changes is different.
 [smfh]: https://github.com/feel-co/smfh
 
 1. Atomically swap `/etc/static` to point at the new generation's etc tree.
-2. Replay the legacy `/etc/.clean` file written by the Perl script: every
-   relative path it lists is removed from `/etc`, then `.clean` itself is
-   removed. The smfh activation in step 5 will recreate any of those entries
-   that are still in the configuration; entries that have been dropped from the
-   configuration stay deleted. One-shot per system.
-3. Walk `/etc` and remove any symlink whose target lives under `/etc/static/`
+2. Walk `/etc` and remove any symlink whose target lives under `/etc/static/`
    but whose entry no longer exists in the new generation. Mirrors the Perl
    `cleanup` pass and protects against symlinks created by an earlier activation
    that are not in our manifest.
-4. Walk the generation's etc store tree and build an [smfh] manifest describing
+3. Walk the generation's etc store tree and build an [smfh] manifest describing
    every entry: pass-through symlinks (`/etc/foo` -> `/etc/static/foo`), direct
    symlinks (`/etc/foo` -> `/nix/store/...`), and copied files (with explicit
    `mode`, `uid`, `gid`).
-5. Write the manifest to `/var/lib/nixos/etc-manifest.json.new`, ask smfh to
-   diff it against the existing `/var/lib/nixos/etc-manifest.json`, and apply
+4. Write the manifest to `$NIXOS_CORE_STATE_DIR/etc-manifest.json.new`, ask smfh to
+   diff it against the existing `$NIXOS_CORE_STATE_DIR/etc-manifest.json`, and apply
    the diff: deactivate (delete) entries that disappeared, activate entries that
    appeared, and atomically re-apply entries whose source changed.
-6. Atomically rename the temp manifest into place.
+5. Atomically rename the temp manifest into place.
+6. Replay the legacy `/etc/.clean` file written by the Perl script: every
+   relative path it lists is removed from `/etc`, then `.clean` itself is
+   removed. Entries still in the configuration were already recreated by smfh
+   in step 4; entries dropped from the configuration stay deleted. One-shot per
+   system. Running after the manifest commit means a failed activation leaves
+   the Perl-tracked files intact so the migration retries cleanly.
 7. Touch `/etc/NIXOS`.
 
-> [!INFO]
-> The manifest at `/var/lib/nixos/etc-manifest.json` is the source of truth for
+> [!NOTE]
+> The manifest at `$NIXOS_CORE_STATE_DIR/etc-manifest.json` is the source of truth for
 > what nixos-core has written into `/etc`. It supersedes the Perl script's
 > `/etc/.clean` state file, which only tracked copied files.
 
@@ -53,7 +54,7 @@ paths of files it had copied. Pass-through symlinks were not tracked there; they
 were cleaned up on the next activation by walking `/etc` and removing any
 symlink under `/etc/static/` that no longer existed in the new generation.
 
-**nixos-core**, however, writes `/var/lib/nixos/etc-manifest.json`, which lists
+**nixos-core**, however, writes `$NIXOS_CORE_STATE_DIR/etc-manifest.json`, which lists
 _every entry_. This includes symlinks, direct symlinks, copies and the like.
 Cleanup of stale entries is driven by an explicit diff between the old and new
 manifest, not by a heuristic walk of `/etc`. The dangling-symlink walk is still
@@ -98,12 +99,12 @@ activation, whether the source changed or not.
 ## Migrating from the Perl script
 
 There's, well, nothing for you to do. The first activation under nixos-core
-rplays `/etc/.clean` to delete every copied file the Perl script tracked, then
-removes the file itself; entries still in the configuration are recreated by the
-manifest activation that follows. `nixos-core` uses the dangling-symlink walk to
+replays `/etc/.clean` to delete every copied file the Perl script tracked, then
+removes the file itself; entries still in the configuration were already recreated
+by the manifest activation. `nixos-core` uses the dangling-symlink walk to
 clean up any pass-through symlinks left over from the previous Perl run that are
 no longer in the configuration, and writes a fresh
-`/var/lib/nixos/etc-manifest.json`.
+`$NIXOS_CORE_STATE_DIR/etc-manifest.json`.
 
 After the first activation, all subsequent activations are diff-driven from the
 manifest. The VM tests for the `setup-etc` module exercise this path end-to-end
@@ -111,13 +112,20 @@ on its `perl` node: boot under `setup-etc.pl`, switch to nixos-core, verify that
 both stale symlinks and stale copied files from the Perl run are removed. If you
 notice any issues, create an issue!
 
+## State Directory
+
+The state directory is controlled by the `NIXOS_CORE_STATE_DIR` environment
+variable, falling back to `/var/lib/nixos` for backward compatibility. This
+allows nixos-core to work on NixOS variants that do not use the `/var/lib/nixos`
+path.
+
 ## Glossary/Files
 
 - `/etc/NIXOS` - tag file marking this filesystem as a NixOS root.
 - `/etc/static` - symlink to the current generation's etc store tree.
-- `/var/lib/nixos/etc-manifest.json` - current manifest. Do not edit manually;
-  setup-etc rewrites it on every activation.
-- `/var/lib/nixos/etc-manifest.json.new` - temp file used for the atomic rename.
+- `$NIXOS_CORE_STATE_DIR/etc-manifest.json` - current manifest. Do not edit manually;
+  setup-etc rewrites it on every activation. Defaults to `/var/lib/nixos/etc-manifest.json`.
+- `$NIXOS_CORE_STATE_DIR/etc-manifest.json.new` - temp file used for the atomic rename.
   Removed automatically on success or failure; if it exists outside an
   in-progress activation, the previous activation crashed mid-write and it is
   safe to delete.
