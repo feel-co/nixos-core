@@ -30,8 +30,12 @@ pub fn run(args: &[String]) -> Result<()> {
   atomic_symlink(&etc, Path::new(ETC_STATIC))
     .context("Failed to update /etc/static symlink")?;
 
-  // Remove the legacy Perl-based state file; the smfh manifest supersedes it.
-  let _ = fs::remove_file("/etc/.clean");
+  // Migrate from the legacy Perl tracking file: delete every copied entry
+  // it lists, then remove the file. smfh's activation will recreate the
+  // ones that are still in the configuration via the manifest. Without
+  // this, stale Perl-era copied files (regular files, not symlinks) would
+  // never be cleaned up by remove_dangling_etc_symlinks below.
+  migrate_perl_clean_file(Path::new("/etc/.clean"), Path::new("/etc"));
 
   // Step 2: Remove dangling /etc symlinks that pointed into the old
   // /etc/static. Kept as a safety net during transition and for symlinks
@@ -71,11 +75,14 @@ pub fn run(args: &[String]) -> Result<()> {
       .map_err(|e| anyhow::anyhow!("Failed to apply manifest diff: {e:?}"))?;
 
     // Step 7: Commit the new manifest atomically.
-    fs::rename(&manifest_tmp, manifest_path).context("Failed to commit manifest")
+    fs::rename(&manifest_tmp, manifest_path)
+      .context("Failed to commit manifest")
   })();
 
   if let Err(ref e) = diff_result {
-    eprintln!("warning: manifest activation failed, cleaning up temp file: {e}");
+    eprintln!(
+      "warning: manifest activation failed, cleaning up temp file: {e}"
+    );
     let _ = fs::remove_file(&manifest_tmp);
   }
   diff_result?;
@@ -123,7 +130,9 @@ fn build_etc_manifest(
     // host). Perl checks the variable as truthy; match that: any non-empty
     // value means we are inside nixos-enter.
     if relative_str == "resolv.conf"
-      && !std::env::var("IN_NIXOS_ENTER").unwrap_or_default().is_empty()
+      && !std::env::var("IN_NIXOS_ENTER")
+        .unwrap_or_default()
+        .is_empty()
     {
       continue;
     }
@@ -343,6 +352,41 @@ fn file_to_json(file: &ManifestFile) -> serde_json::Value {
     v["permissions"] = serde_json::Value::String(format!("{perm:o}"));
   }
   v
+}
+
+/// Read the legacy Perl `/etc/.clean` state file (one relative path per line),
+/// delete every listed file under `etc_dir`, and remove the state file. No-op
+/// if the file does not exist. The smfh activation that follows will recreate
+/// any entries still in the configuration; entries that were dropped from the
+/// configuration stay deleted.
+fn migrate_perl_clean_file(clean_file: &Path, etc_dir: &Path) {
+  let contents = match fs::read_to_string(clean_file) {
+    Ok(s) => s,
+    Err(_) => return,
+  };
+
+  for line in contents.lines() {
+    let entry = line.trim();
+    if entry.is_empty() || entry.starts_with('/') || entry.contains("..") {
+      // Skip blank lines and anything that tries to escape /etc.
+      continue;
+    }
+    let target = etc_dir.join(entry);
+    if let Err(e) = fs::remove_file(&target)
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      eprintln!(
+        "warning: failed to remove legacy Perl-era file {}: {e}",
+        target.display()
+      );
+    }
+  }
+
+  if let Err(e) = fs::remove_file(clean_file)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    eprintln!("warning: failed to remove {}: {e}", clean_file.display());
+  }
 }
 
 /// Remove any symlink inside `etc_dir` whose target starts with `/etc/static/`
