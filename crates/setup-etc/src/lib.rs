@@ -22,7 +22,8 @@ const ETC_MANIFEST_DEFAULT: &str = "/var/lib/nixos/etc-manifest.json";
 const ETC_MANIFEST_ENV: &str = "NIXOS_CORE_STATE_DIR";
 
 fn get_etc_manifest() -> PathBuf {
-  let state_dir = std::env::var(ETC_MANIFEST_ENV).unwrap_or_else(|_| ETC_MANIFEST_DEFAULT.to_string());
+  let state_dir = std::env::var(ETC_MANIFEST_ENV)
+    .unwrap_or_else(|_| ETC_MANIFEST_DEFAULT.to_string());
   PathBuf::from(state_dir).join("etc-manifest.json")
 }
 
@@ -36,13 +37,6 @@ pub fn run(args: &[String]) -> Result<()> {
   atomic_symlink(&etc, Path::new(ETC_STATIC))
     .context("Failed to update /etc/static symlink")?;
 
-  // Migrate from the legacy Perl tracking file: delete every copied entry
-  // it lists, then remove the file. smfh's activation will recreate the
-  // ones that are still in the configuration via the manifest. Without
-  // this, stale Perl-era copied files (regular files, not symlinks) would
-  // never be cleaned up by remove_dangling_etc_symlinks below.
-  migrate_perl_clean_file(Path::new("/etc/.clean"), Path::new("/etc"));
-
   // Step 2: Remove dangling /etc symlinks that pointed into the old
   // /etc/static. Kept as a safety net during transition and for symlinks
   // created outside of the manifest.
@@ -55,7 +49,7 @@ pub fn run(args: &[String]) -> Result<()> {
   // Step 4: Serialise to JSON. permissions must be octal strings because
   // smfh-core's deserialize_octal only accepts Option<String>.
   let files_json: Vec<serde_json::Value> =
-    files.iter().map(file_to_json).collect();
+    files.iter().map(file_to_json).collect::<Result<Vec<_>>>()?;
   let manifest_content = serde_json::to_string_pretty(
     &serde_json::json!({"version": 1, "files": files_json}),
   )
@@ -94,7 +88,14 @@ pub fn run(args: &[String]) -> Result<()> {
   }
   diff_result?;
 
-  // Step 8: Ensure the /etc/NIXOS tag file exists.
+  // Step 8: Migrate from the legacy Perl tracking file: delete every copied
+  // entry it lists, then remove the file. smfh's activation above recreated
+  // any entries still in the configuration; dropped entries stay deleted.
+  // Running this after the manifest commit means a failed activation leaves
+  // the Perl-tracked files intact. The migration retries on the next run.
+  migrate_perl_clean_file(Path::new("/etc/.clean"), Path::new("/etc"));
+
+  // Step 9: Ensure the /etc/NIXOS tag file exists.
   create_nixos_tag()?;
 
   Ok(())
@@ -134,12 +135,11 @@ fn build_etc_manifest(
     let relative_str = relative.to_string_lossy();
 
     // Skip resolv.conf when running inside `nixos-enter` (bind-mounted by the
-    // host). Perl checks the variable as truthy; match that: any non-empty
-    // value means we are inside nixos-enter.
+    // host). Perl checks the variable as truthy: non-empty and not "0".
     if relative_str == "resolv.conf"
-      && !std::env::var("IN_NIXOS_ENTER")
-        .unwrap_or_default()
-        .is_empty()
+      && std::env::var("IN_NIXOS_ENTER")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
     {
       continue;
     }
@@ -352,13 +352,13 @@ fn build_etc_manifest(
 
 /// Serialise a `ManifestFile` to a JSON value, writing `permissions` as an
 /// octal string so that smfh-core's `deserialize_octal` round-trips correctly.
-fn file_to_json(file: &ManifestFile) -> serde_json::Value {
-  let mut v =
-    serde_json::to_value(file).expect("ManifestFile is always serialisable");
+fn file_to_json(file: &ManifestFile) -> Result<serde_json::Value> {
+  let mut v = serde_json::to_value(file)
+    .context("ManifestFile is always serialisable")?;
   if let Some(perm) = file.permissions {
     v["permissions"] = serde_json::Value::String(format!("{perm:o}"));
   }
-  v
+  Ok(v)
 }
 
 /// Read the legacy Perl `/etc/.clean` state file (one relative path per line),
@@ -738,7 +738,7 @@ mod tests {
       follow_symlinks:     None,
       ignore_modification: None,
     };
-    let v = file_to_json(&file);
+    let v = file_to_json(&file).unwrap();
     assert_eq!(
       v["permissions"],
       serde_json::Value::String("644".to_string())
