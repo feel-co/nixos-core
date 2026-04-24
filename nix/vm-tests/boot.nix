@@ -6,29 +6,44 @@
 mkTest {
   name = "nixos-core-boot";
 
-  nodes.machine = {
-    imports = [nixosModule testCommons];
-    system.nixos-core.enable = true;
-    boot = {
-      loader.grub.enable = false;
-      # nixos-core's stage1 only runs with the scripted initrd; systemd initrd
-      # would bypass it entirely and also forbids postMountCommands.
-      initrd.systemd.enable = false;
+  nodes = {
+    machine = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot = {
+        loader.grub.enable = false;
+        # nixos-core's stage1 only runs with the scripted initrd; systemd initrd
+        # would bypass it entirely and also forbids postMountCommands.
+        initrd.systemd.enable = false;
 
-      # Canary launched during stage1's postMountCommands. After switch_root,
-      # stage1 calls kill_remaining_processes; a plain shell process (cmdline
-      # does not start with '@') must be killed. /run is moved to the new root
-      # via MS_MOVE so the pid-file survives into the booted system.
-      initrd.postMountCommands = ''
-        sh -c 'while true; do sleep 1; done' &
-        echo $! > /run/canary.pid
-        while [ ! -s /run/canary.pid ]; do sleep 0.1; done
-      '';
+        # Canary launched during stage1's postMountCommands. After switch_root,
+        # stage1 calls kill_remaining_processes; a plain shell process (cmdline
+        # does not start with '@') must be killed. /run is moved to the new root
+        # via MS_MOVE so the pid-file survives into the booted system.
+        initrd.postMountCommands = ''
+          sh -c 'while true; do sleep 1; done' &
+          echo $! > /run/canary.pid
+          while [ ! -s /run/canary.pid ]; do sleep 0.1; done
+        '';
 
-      # Marker written by stage2's postBootCommands hook.
-      postBootCommands = "touch /etc/post-boot-ran";
+        # Marker written by stage2's postBootCommands hook.
+        postBootCommands = "touch /etc/post-boot-ran";
+      };
+
+      networking.hostId = "cafebabe";
     };
-    networking.hostId = "cafebabe";
+
+    # Separate VM for lustrate tests so machine state is not shared.
+    lustrate = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot = {
+        loader.grub.enable = false;
+        initrd.systemd.enable = false;
+      };
+
+      networking.hostId = "deadbeef";
+    };
   };
 
   testScript = ''
@@ -65,8 +80,54 @@ mkTest {
       # Upstream pivots with `exec env -i` so LD_LIBRARY_PATH=@extraUtils@/lib
       # doesn't leak into PID 1 and break systemd's libseccomp dlopen.
       machine.fail("tr '\\0' '\\n' < /proc/1/environ | grep -q '^LD_LIBRARY_PATH='")
+
       # Without seccomp, systemd drops the service PATH that resolves
       # relative ExecStart names, so tmpfiles-setup and friends 203/EXEC.
       machine.succeed("test -z \"$(systemctl --failed --no-legend)\"")
+
+    # Two passes:
+    #   1. Files outside nix/boot are moved to /old-root and
+    #      the lustrate file is removed; system still boots after.
+    #   2. Pre-existing /old-root.tmp must be correctly absorbed
+    #      into the new /old-root via the atomic rename, not left
+    #      orphaned.
+    lustrate.start()
+    lustrate.wait_for_unit("multi-user.target")
+
+    with subtest("lustrate - non-protected entry moved to old-root"):
+      lustrate.succeed("echo lustrate-content > /lustrate-marker")
+      lustrate.succeed("touch /nixos-lustrate")
+      lustrate.shutdown()
+      lustrate.start()
+      lustrate.wait_for_unit("multi-user.target")
+
+      # /nixos-lustrate is deleted by handle_lustrate after completion.
+      lustrate.fail("test -f /nixos-lustrate")
+
+      # The marker must have been moved, not left at root.
+      lustrate.fail("test -f /lustrate-marker")
+      lustrate.succeed("test -f /old-root/lustrate-marker")
+
+    with subtest("lustrate - pre-existing old-root.tmp is absorbed"):
+      # Simulate a crash that left a partial old-root.tmp but no old-root.
+      # rename(2) only needs write permission on /'s directory entry, so this
+      # works even though /old-root/var/empty carries chattr +i.
+      lustrate.succeed("mv /old-root /old-root-discarded")
+      lustrate.succeed("mkdir -p /old-root.tmp && echo sentinel > /old-root.tmp/sentinel")
+      lustrate.succeed("echo another-marker > /another-marker")
+      lustrate.succeed("touch /nixos-lustrate")
+      lustrate.shutdown()
+      lustrate.start()
+      lustrate.wait_for_unit("multi-user.target")
+
+      # Rename must have promoted old-root.tmp to old-root.
+      lustrate.succeed("test -d /old-root")
+      lustrate.fail("test -e /old-root.tmp")
+
+      # Entries from the aborted run are preserved.
+      lustrate.succeed("test -f /old-root/sentinel")
+
+      # Entries from the new run are also present.
+      lustrate.succeed("test -f /old-root/another-marker")
   '';
 }
