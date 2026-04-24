@@ -21,6 +21,31 @@ in
     nodes = {
       machine = mkMachine {withSystemd = false;};
       machineSystemd = mkMachine {withSystemd = true;};
+
+      # Stage1 must create the bind-mount target as a file (not a directory)
+      # when the source is a regular file. The source is baked into the initrd
+      # CPIO via extraFiles (wired via initialRamdisk) so it is guaranteed
+      # to be present when mount_additional_filesystems runs.
+      fileBindMount = {pkgs, ...}: {
+        imports = [nixosModule testCommons];
+        system.nixos-core.enable = true;
+        boot = {
+          loader.grub.enable = false;
+          initrd.systemd.enable = false;
+
+          initrd.extraFiles."/bind-src".source =
+            pkgs.writeText "bind-src-content" "file-bind-marker";
+        };
+
+        # qemu-vm.nix overrides fileSystems via mkVMOverride; use
+        # virtualisation.fileSystems to survive that.
+        virtualisation.fileSystems."/var/bound" = {
+          device = "/bind-src";
+          fsType = "none";
+          options = ["bind"];
+          neededForBoot = true;
+        };
+      };
     };
 
     testScript = ''
@@ -67,5 +92,21 @@ in
 
       with subtest("systemd-initrd: systemd state passing from initrd"):
         machineSystemd.succeed("systemd-analyze | grep -q '(initrd)'")
+
+      # File bind-mount. Start after the other VMs are done to avoid
+      fileBindMount.start()
+      fileBindMount.wait_for_unit("multi-user.target")
+
+      with subtest("file bind-mount: target is a regular file, not a directory"):
+        fileBindMount.succeed("test -f /var/bound")
+
+      with subtest("file bind-mount: inode is reachable after switch_root"):
+        content = fileBindMount.succeed("cat /var/bound").strip()
+        assert content == "file-bind-marker", f"got {content!r}"
+
+      with subtest("file bind-mount: no stage1 mount warnings"):
+        fileBindMount.fail(
+          "journalctl -b --no-pager | grep -F 'Warning: failed to mount'"
+        )
     '';
   }
