@@ -947,7 +947,7 @@ fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
   Ok(true)
 }
 
-fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
+fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
   log_message(
     &format!(
       "Mounting {} ({}) at {:?}",
@@ -972,12 +972,17 @@ fn mount_filesystem(fs_info: &FsInfo) -> Result<()> {
       return Ok(());
     },
     "bcachefs" => {
-      // Mounted by the `mount.bcachefs` helper.
+      // bcachefs device strings may be colon-separated multi-device paths
+      // (e.g. "/dev/sda1:/dev/sda2"). Wait for each component individually
+      // before handing the full joined string to mount.bcachefs.
+      for component in fs_info.device.split(':') {
+        wait_for_device(component, 30, dm).ok();
+      }
       return mount_bcachefs(
         &fs_info.device,
         &fs_info.mountpoint,
         &fs_info.options,
-        None,
+        Some(Duration::from_secs(30)),
       );
     },
     "bind" => {
@@ -1342,6 +1347,7 @@ fn mount_root(
 fn mount_additional_filesystems(
   fs_infos: &[FsInfo],
   target_root: &Path,
+  dm: &DeviceManager,
 ) -> Result<()> {
   for fs_info in fs_infos {
     if fs_info.mountpoint == Path::new("/") {
@@ -1393,7 +1399,7 @@ fn mount_additional_filesystems(
         .collect();
     }
 
-    if let Err(e) = mount_filesystem(&adjusted_fs_info) {
+    if let Err(e) = mount_filesystem(&adjusted_fs_info, dm) {
       log_message(
         &format!(
           "Warning: failed to mount {:?}: {:#}",
@@ -2239,8 +2245,12 @@ pub fn run(args: &[String]) -> Result<()> {
   }
 
   if !fs_infos.is_empty() {
-    mount_additional_filesystems(&fs_infos, &config.target_root)
-      .context("Failed to mount additional filesystems")?;
+    mount_additional_filesystems(
+      &fs_infos,
+      &config.target_root,
+      &config.device_manager,
+    )
+    .context("Failed to mount additional filesystems")?;
   }
 
   if let Some(script) = &config.early_mount_script
