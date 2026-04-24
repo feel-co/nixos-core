@@ -2095,6 +2095,20 @@ fn parse_mount_options<'a>(
   (flags, data_str)
 }
 
+fn special_mount_target(target_root: &Path, mountpoint: &str) -> PathBuf {
+  let absolute = Path::new(mountpoint);
+
+  // These roots are MS_MOVE'd into the final root, so child mounts have to live
+  // under the initrd mount tree or they will be hidden after switch_root.
+  for moved_root in ["/dev", "/proc", "/sys", "/run"].map(Path::new) {
+    if absolute.starts_with(moved_root) {
+      return absolute.to_path_buf();
+    }
+  }
+
+  target_root.join(mountpoint.strip_prefix('/').unwrap_or(mountpoint))
+}
+
 /// Main entry point for stage 1 initialization
 pub fn run(args: &[String]) -> Result<()> {
   // Mount /proc early so KernelCmdline::parse() can read /proc/cmdline.
@@ -2258,9 +2272,16 @@ pub fn run(args: &[String]) -> Result<()> {
       let options = &args[2];
       let fstype = &args[3];
 
-      let target = config
-        .target_root
-        .join(mountpoint.strip_prefix('/').unwrap_or(mountpoint));
+      let target = special_mount_target(&config.target_root, mountpoint);
+      if is_mounted(&target) {
+        log_message(
+          &format!(
+            "Skipping specialMount {mountpoint}: {target:?} is already mounted"
+          ),
+          true,
+        );
+        continue;
+      }
       fs::create_dir_all(&target)?;
 
       let (flags, data) = parse_mount_options(options.split(','));
