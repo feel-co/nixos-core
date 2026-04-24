@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   fs::{self, OpenOptions},
   os::unix::fs::symlink,
   path::{Path, PathBuf},
@@ -18,7 +19,7 @@ struct Args {
 }
 
 const ETC_STATIC: &str = "/etc/static";
-const ETC_MANIFEST_DEFAULT: &str = "/var/lib/nixos/etc-manifest.json";
+const ETC_MANIFEST_DEFAULT: &str = "/var/lib/nixos";
 const ETC_MANIFEST_ENV: &str = "NIXOS_CORE_STATE_DIR";
 
 fn get_etc_manifest() -> PathBuf {
@@ -88,12 +89,14 @@ pub fn run(args: &[String]) -> Result<()> {
   }
   diff_result?;
 
-  // Step 8: Migrate from the legacy Perl tracking file: delete every copied
-  // entry it lists, then remove the file. smfh's activation above recreated
-  // any entries still in the configuration; dropped entries stay deleted.
-  // Running this after the manifest commit means a failed activation leaves
-  // the Perl-tracked files intact. The migration retries on the next run.
-  migrate_perl_clean_file(Path::new("/etc/.clean"), Path::new("/etc"));
+  // Step 8: Migrate from the legacy Perl tracking file: delete every entry it
+  // lists that is no longer in the current configuration (stale copies), then
+  // remove the file itself. Entries still in the configuration were already
+  // activated by smfh above and must not be deleted. Running after the manifest
+  // commit means a failed activation leaves Perl-tracked files intact; the
+  // migration retries cleanly on the next run.
+  let kept: HashSet<PathBuf> = files.iter().map(|f| f.target.clone()).collect();
+  migrate_perl_clean_file(Path::new("/etc/.clean"), Path::new("/etc"), &kept);
 
   // Step 9: Ensure the /etc/NIXOS tag file exists.
   create_nixos_tag()?;
@@ -362,11 +365,15 @@ fn file_to_json(file: &ManifestFile) -> Result<serde_json::Value> {
 }
 
 /// Read the legacy Perl `/etc/.clean` state file (one relative path per line),
-/// delete every listed file under `etc_dir`, and remove the state file. No-op
-/// if the file does not exist. The smfh activation that follows will recreate
-/// any entries still in the configuration; entries that were dropped from the
-/// configuration stay deleted.
-fn migrate_perl_clean_file(clean_file: &Path, etc_dir: &Path) {
+/// delete every listed file under `etc_dir` that is not in `kept`, and remove
+/// the state file. No-op if the file does not exist. `kept` is the set of
+/// target paths that the new manifest owns; those entries were already
+/// activated by smfh and must not be removed.
+fn migrate_perl_clean_file(
+  clean_file: &Path,
+  etc_dir: &Path,
+  kept: &HashSet<PathBuf>,
+) {
   let contents = match fs::read_to_string(clean_file) {
     Ok(s) => s,
     Err(_) => return,
@@ -379,6 +386,9 @@ fn migrate_perl_clean_file(clean_file: &Path, etc_dir: &Path) {
       continue;
     }
     let target = etc_dir.join(entry);
+    if kept.contains(&target) {
+      continue;
+    }
     if let Err(e) = fs::remove_file(&target)
       && e.kind() != std::io::ErrorKind::NotFound
     {
