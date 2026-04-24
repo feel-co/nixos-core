@@ -1048,6 +1048,30 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
     },
   }
 
+  // The kernel silently ignores mount flags (nosuid, noexec, nodev, …) on the
+  // initial MS_BIND call. A separate remount is required to enforce them.
+  // The initrd script basically remounts after any bind/rbind mount, which we
+  // should match here.
+  let is_bind = fs_info.fstype == "bind"
+    || fs_info.options.iter().any(|o| o == "bind" || o == "rbind");
+  if is_bind {
+    let (remount_flags, remount_data) =
+      parse_mount_options(fs_info.options.iter().map(String::as_str));
+    mount(
+      None::<&str>,
+      &fs_info.mountpoint,
+      None::<&str>,
+      MsFlags::MS_REMOUNT | MsFlags::MS_BIND | remount_flags,
+      remount_data.as_deref(),
+    )
+    .with_context(|| {
+      format!(
+        "Failed to remount {:?} with security options",
+        fs_info.mountpoint
+      )
+    })?;
+  }
+
   Ok(())
 }
 
