@@ -54,8 +54,9 @@ mkTest ({nodes, ...}: {
       system.nixos-core.enable = true;
       boot.loader.grub.enable = false;
 
-      # Use a custom state directory to verify NIXOS_CORE_STATE_DIR works.
-      environment.variables.NIXOS_CORE_STATE_DIR = "/var/lib/custom-nixos";
+      # Use a custom state directory to verify the stateDir option is exported
+      # correctly. environment.variables is not sourced by activation scripts.
+      system.nixos-core.stateDir = "/var/lib/custom-nixos";
 
       environment.etc = {
         "custom-state-marker".text = "custom-state-works";
@@ -113,10 +114,10 @@ mkTest ({nodes, ...}: {
     perl.wait_for_unit("multi-user.target")
 
     with subtest("custom state directory respects NIXOS_CORE_STATE_DIR"):
-      custom_state.succeed("test -f /var/lib/custom-nixos/etc-manifest.json")
-      custom_state.succeed("grep -q custom-state-marker /var/lib/custom-nixos/etc-manifest.json")
-      custom_state.succeed("grep -q custom-state-secret /var/lib/custom-nixos/etc-manifest.json")
-      custom_state.succeed("test ! -f /var/lib/nixos/etc-manifest.json")
+      state.succeed("test -f /var/lib/custom-nixos/etc-manifest.json")
+      state.succeed("grep -q custom-state-marker /var/lib/custom-nixos/etc-manifest.json")
+      state.succeed("grep -q custom-state-secret /var/lib/custom-nixos/etc-manifest.json")
+      state.succeed("test ! -f /var/lib/nixos/etc-manifest.json")
 
     with subtest("text entry symlinked through /etc/static"):
       machine.succeed("grep -qx nixos-core-works /etc/nixos-core-marker")
