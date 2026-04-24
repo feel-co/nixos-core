@@ -890,9 +890,13 @@ fn needs_fsck(fstype: &str, check_journaling: bool) -> bool {
 fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
   log_message(&format!("Checking {fstype} filesystem on {device}"), true);
 
-  // Skip if device is a pseudo-device
-  if device.starts_with("/dev/loop") || device.starts_with("/dev/zram") {
-    return Ok(true);
+  // Skip non-block devices. Matches bash `[ ! -b "$device" ] && continue`:
+  // anything that isn't a block device (pseudo-fs, missing path, etc.) is
+  // skipped.
+  match fs::metadata(device) {
+    Ok(meta) if !meta.file_type().is_block_device() => return Ok(true),
+    Err(_) => return Ok(true),
+    Ok(_) => {},
   }
 
   let mut cmd = Command::new("fsck");
@@ -956,10 +960,29 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
     true,
   );
 
-  // Create mountpoint
-  fs::create_dir_all(&fs_info.mountpoint).with_context(|| {
-    format!("Failed to create mountpoint: {:?}", fs_info.mountpoint)
-  })?;
+  // Create mountpoint. File bind-mounts require a file target, not a directory.
+  let is_file_bind = (fs_info.fstype == "bind"
+    || fs_info.options.iter().any(|o| o == "bind" || o == "rbind"))
+    && fs::metadata(&fs_info.device)
+      .map(|m| !m.is_dir())
+      .unwrap_or(false);
+
+  if is_file_bind {
+    if let Some(parent) = fs_info.mountpoint.parent() {
+      fs::create_dir_all(parent).with_context(|| {
+        format!("Failed to create parent of mountpoint: {:?}", parent)
+      })?;
+    }
+    if !fs_info.mountpoint.exists() {
+      fs::write(&fs_info.mountpoint, b"").with_context(|| {
+        format!("Failed to create file mountpoint: {:?}", fs_info.mountpoint)
+      })?;
+    }
+  } else {
+    fs::create_dir_all(&fs_info.mountpoint).with_context(|| {
+      format!("Failed to create mountpoint: {:?}", fs_info.mountpoint)
+    })?;
+  }
 
   // Handle special filesystem types
   match fs_info.fstype.as_str() {
@@ -1553,8 +1576,11 @@ fn handle_lustrate(target_root: &Path) -> Result<()> {
 
   let content = fs::read_to_string(&lustrate_file)?;
 
+  // Stage moves into old-root.tmp first; rename atomically when complete so
+  // a crash mid-way leaves old-root.tmp (not old-root), and a re-run retries.
+  let backup_tmp = target_root.join("old-root.tmp");
   let backup_dir = target_root.join("old-root");
-  fs::create_dir_all(&backup_dir)?;
+  fs::create_dir_all(&backup_tmp)?;
 
   for entry in fs::read_dir(target_root)? {
     let entry = entry?;
@@ -1564,11 +1590,12 @@ fn handle_lustrate(target_root: &Path) -> Result<()> {
     if name_str.starts_with("nix")
       || name_str.starts_with("boot")
       || name_str == "old-root"
+      || name_str == "old-root.tmp"
     {
       continue;
     }
 
-    let dest = backup_dir.join(&name);
+    let dest = backup_tmp.join(&name);
     if let Err(e) = move_path(&entry.path(), &dest) {
       log_message(
         &format!("Warning: move failed for {:?}: {}", entry.path(), e),
@@ -1576,6 +1603,10 @@ fn handle_lustrate(target_root: &Path) -> Result<()> {
       );
     }
   }
+
+  fs::rename(&backup_tmp, &backup_dir).with_context(|| {
+    format!("Failed to rename {:?} to {:?}", backup_tmp, backup_dir)
+  })?;
 
   // Restore entries listed in the lustrate file (mirrors original bash read
   // loop)
@@ -2256,6 +2287,9 @@ pub fn run(args: &[String]) -> Result<()> {
     );
   }
 
+  // XXX: Must run before mount_additional_filesystems.
+  handle_lustrate(&config.target_root).context("Failed to handle lustrate")?;
+
   for fs_info in &fs_infos {
     if needs_fsck(&fs_info.fstype, config.check_journaling_fs)
       && let Err(e) =
@@ -2350,7 +2384,6 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to copy ISO to RAM")?;
   handle_persistence(&cmdline, &config.target_root, &config.device_manager)
     .context("Failed to handle persistence")?;
-  handle_lustrate(&config.target_root).context("Failed to handle lustrate")?;
   copy_initrd_secrets(&config.target_root)
     .context("Failed to copy initrd secrets")?;
   set_host_id(config.set_host_id.as_deref())
