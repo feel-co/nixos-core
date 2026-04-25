@@ -21,8 +21,8 @@ use nix::{
 
 #[derive(Debug)]
 enum DeviceManager {
-  Udev { udevd: PathBuf, udevadm: PathBuf },
-  Mdev { mdev: PathBuf },
+  Udev { udevd: PathBuf, udevadm: PathBuf, rules: Option<PathBuf> },
+  Mdev { mdev: PathBuf, conf: Option<PathBuf> },
 }
 
 impl Default for DeviceManager {
@@ -30,6 +30,7 @@ impl Default for DeviceManager {
     Self::Udev {
       udevd:   PathBuf::from("systemd-udevd"),
       udevadm: PathBuf::from("udevadm"),
+      rules:   None,
     }
   }
 }
@@ -45,6 +46,7 @@ impl DeviceManager {
                 .map_or_else(|| PathBuf::from("mdev"), |u| u.join("bin/mdev"))
             },
           ),
+          conf: env::var("MDEV_CONF").ok().map(PathBuf::from),
         }
       },
       _ => {
@@ -65,16 +67,17 @@ impl DeviceManager {
                 |u| u.join("bin/udevadm"),
               )
             }),
+          rules: env::var("udevRules").ok().map(PathBuf::from),
         }
       },
     }
   }
 
-  fn start(&self, rules_path: Option<&Path>) -> Result<()> {
+  fn start(&self) -> Result<()> {
     log_message("Starting device manager...", true);
     match self {
-      Self::Udev { udevd, .. } => {
-        if let Some(rules) = rules_path {
+      Self::Udev { udevd, rules, .. } => {
+        if let Some(rules) = rules {
           let rules_dir = Path::new("/etc/udev/rules.d");
           fs::create_dir_all(rules_dir)?;
           if rules.is_dir() {
@@ -96,7 +99,18 @@ impl DeviceManager {
             format!("Failed to start udevd: {}", udevd.display())
           })?;
       },
-      Self::Mdev { mdev } => {
+      Self::Mdev { mdev, conf } => {
+        if let Some(conf) = conf {
+          let dest = Path::new("/etc/mdev.conf");
+          fs::create_dir_all(dest.parent().unwrap())?;
+          fs::copy(conf, dest).with_context(|| {
+            format!(
+              "Failed to copy mdev.conf from {} to {}",
+              conf.display(),
+              dest.display()
+            )
+          })?;
+        }
         // -d: listen for kernel hotplug events; -s: initial coldplug scan.
         Command::new(mdev).arg("-d").status().with_context(|| {
           format!("Failed to start mdev: {}", mdev.display())
@@ -202,7 +216,6 @@ struct Stage1Config {
   post_resume_commands: Option<PathBuf>,
   post_mount_commands:  Option<PathBuf>,
   early_mount_script:   Option<PathBuf>,
-  udev_rules:           Option<PathBuf>,
   link_units:           Option<PathBuf>,
   check_journaling_fs:  bool,
   set_host_id:          Option<String>,
@@ -350,7 +363,6 @@ impl Stage1Config {
         .ok()
         .map(PathBuf::from),
       early_mount_script: env::var("earlyMountScript").ok().map(PathBuf::from),
-      udev_rules: env::var("udevRules").ok().map(PathBuf::from),
       link_units: env::var("linkUnits").ok().map(PathBuf::from),
       check_journaling_fs: env::var("checkJournalingFS")
         .map(|v| v != "0" && v != "false")
@@ -2220,7 +2232,7 @@ pub fn run(args: &[String]) -> Result<()> {
 
   config
     .device_manager
-    .start(config.udev_rules.as_deref())
+    .start()
     .context("Failed to start device manager")?;
   config
     .device_manager
