@@ -3,7 +3,7 @@ use std::{
   fs::{self, File, Permissions},
   io::{BufRead, BufReader, Error, Write},
   os::unix::fs::{PermissionsExt, chown},
-  path::Path,
+  path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
@@ -19,11 +19,27 @@ unsafe extern "C" {
   fn getpwuid(uid: u32) -> *mut libc::passwd;
 }
 
-const UID_MAP_FILE: &str = "/var/lib/nixos/uid-map";
-const GID_MAP_FILE: &str = "/var/lib/nixos/gid-map";
-const DECL_USERS_FILE: &str = "/var/lib/nixos/declarative-users";
-const DECL_GROUPS_FILE: &str = "/var/lib/nixos/declarative-groups";
-const SUBUID_MAP_FILE: &str = "/var/lib/nixos/auto-subuid-map";
+fn get_state_dir() -> PathBuf {
+  let state_dir = std::env::var("NIXOS_CORE_STATE_DIR")
+    .unwrap_or_else(|_| "/var/lib/nixos".to_string());
+  PathBuf::from(state_dir)
+}
+
+fn uid_map_path(state_dir: &Path) -> PathBuf {
+  state_dir.join("uid-map")
+}
+fn gid_map_path(state_dir: &Path) -> PathBuf {
+  state_dir.join("gid-map")
+}
+fn decl_users_path(state_dir: &Path) -> PathBuf {
+  state_dir.join("declarative-users")
+}
+fn decl_groups_path(state_dir: &Path) -> PathBuf {
+  state_dir.join("declarative-groups")
+}
+fn subuid_map_path(state_dir: &Path) -> PathBuf {
+  state_dir.join("auto-subuid-map")
+}
 
 const SYSTEM_UID_MIN: u32 = 400;
 const SYSTEM_UID_MAX: u32 = 999;
@@ -137,16 +153,23 @@ pub fn run(args: &[String]) -> Result<()> {
   let is_dry = args.dry_activate
     || std::env::var("NIXOS_ACTION").unwrap_or_default() == "dry-activate";
 
+  let state_dir = get_state_dir();
+
   if !is_dry {
-    fs::create_dir_all("/var/lib/nixos")?;
+    fs::create_dir_all(&state_dir)?;
   }
 
-  let mut uid_map: HashMap<String, u32> = load_json_file(UID_MAP_FILE)?;
-  let mut gid_map: HashMap<String, u32> = load_json_file(GID_MAP_FILE)?;
-  let mut sub_uid_map: HashMap<String, u32> = load_json_file(SUBUID_MAP_FILE)?;
+  let mut uid_map: HashMap<String, u32> =
+    load_json_file(&uid_map_path(&state_dir).display().to_string())?;
+  let mut gid_map: HashMap<String, u32> =
+    load_json_file(&gid_map_path(&state_dir).display().to_string())?;
+  let mut sub_uid_map: HashMap<String, u32> =
+    load_json_file(&subuid_map_path(&state_dir).display().to_string())?;
 
-  let decl_users = load_declarative_list(DECL_USERS_FILE)?;
-  let decl_groups = load_declarative_list(DECL_GROUPS_FILE)?;
+  let decl_users =
+    load_declarative_list(&decl_users_path(&state_dir).display().to_string())?;
+  let decl_groups =
+    load_declarative_list(&decl_groups_path(&state_dir).display().to_string())?;
 
   let spec_content = fs::read_to_string(&args.spec_file)
     .with_context(|| format!("Failed to read spec file: {}", args.spec_file))?;
@@ -250,7 +273,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut names: Vec<&String> = groups_out.keys().collect();
     names.sort();
     update_file(
-      DECL_GROUPS_FILE,
+      &decl_groups_path(&state_dir).display().to_string(),
       &names
         .iter()
         .map(|s| s.as_str())
@@ -293,7 +316,11 @@ pub fn run(args: &[String]) -> Result<()> {
     update_file_lines("/etc/group", &lines, 0o644, is_dry)?;
   }
 
-  update_file_json_map(GID_MAP_FILE, &gid_map, is_dry)?;
+  update_file_json_map(
+    &gid_map_path(&state_dir).display().to_string(),
+    &gid_map,
+    is_dry,
+  )?;
 
   nscd_invalidate("group", is_dry);
 
@@ -462,7 +489,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut names: Vec<&String> = users_out.keys().collect();
     names.sort();
     update_file(
-      DECL_USERS_FILE,
+      &decl_users_path(&state_dir).display().to_string(),
       &names
         .iter()
         .map(|s| s.as_str())
@@ -510,7 +537,11 @@ pub fn run(args: &[String]) -> Result<()> {
     update_file_lines("/etc/passwd", &lines, 0o644, is_dry)?;
   }
 
-  update_file_json_map(UID_MAP_FILE, &uid_map, is_dry)?;
+  update_file_json_map(
+    &uid_map_path(&state_dir).display().to_string(),
+    &uid_map,
+    is_dry,
+  )?;
 
   nscd_invalidate("passwd", is_dry);
 
@@ -678,7 +709,11 @@ pub fn run(args: &[String]) -> Result<()> {
 
   update_file_lines("/etc/subuid", &sub_uids, 0o644, is_dry)?;
   update_file_lines("/etc/subgid", &sub_gids, 0o644, is_dry)?;
-  update_file_json_map(SUBUID_MAP_FILE, &sub_uid_map, is_dry)?;
+  update_file_json_map(
+    &subuid_map_path(&state_dir).display().to_string(),
+    &sub_uid_map,
+    is_dry,
+  )?;
 
   Ok(())
 }
