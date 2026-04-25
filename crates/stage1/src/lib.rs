@@ -21,8 +21,15 @@ use nix::{
 
 #[derive(Debug)]
 enum DeviceManager {
-  Udev { udevd: PathBuf, udevadm: PathBuf, rules: Option<PathBuf> },
-  Mdev { mdev: PathBuf, conf: Option<PathBuf> },
+  Udev {
+    udevd:   PathBuf,
+    udevadm: PathBuf,
+    rules:   Option<PathBuf>,
+  },
+  Mdev {
+    mdev: PathBuf,
+    conf: Option<PathBuf>,
+  },
 }
 
 impl Default for DeviceManager {
@@ -67,7 +74,7 @@ impl DeviceManager {
                 |u| u.join("bin/udevadm"),
               )
             }),
-          rules: env::var("udevRules").ok().map(PathBuf::from),
+          rules:   env::var("udevRules").ok().map(PathBuf::from),
         }
       },
     }
@@ -171,7 +178,7 @@ impl DeviceManager {
           .args(["settle", "--timeout=3"])
           .status();
       },
-      Self::Mdev { mdev } => {
+      Self::Mdev { mdev, .. } => {
         let _ = Command::new(mdev).arg("-s").status();
       },
     }
@@ -183,7 +190,7 @@ impl DeviceManager {
       Self::Udev { udevadm, .. } => {
         let _ = Command::new(udevadm).args(["control", "--exit"]).status();
       },
-      Self::Mdev { mdev } => {
+      Self::Mdev { mdev, .. } => {
         let name = mdev.file_name().unwrap_or(mdev.as_os_str());
         let _ = Command::new("pkill").arg(name).status();
       },
