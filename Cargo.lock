@@ -755,8 +755,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 [[package]]
 name = "smfh-core"
 version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4fcbab3bf9b86308f5783339395084885b56815e3e00301d49046941e14be8c"
+source = "git+https://github.com/feel-co/smfh.git?branch=main#7e685ddadcbc518662d5b5b0db35b9ba4e1add47"
 dependencies = [
  "blake3",
  "color-eyre",

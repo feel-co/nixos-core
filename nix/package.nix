@@ -51,7 +51,13 @@ in
         ];
       };
 
-    cargoLock.lockFile = ../Cargo.lock;
+    cargoLock = {
+      lockFile = ../Cargo.lock;
+      # FIXME: drop when smfh 1.5.0 is tagged
+      outputHashes = {
+        "smfh-core-1.4.0" = "sha256-8aLIC3bWQS+mb9sQnEB8utjJfwLMMIKQNYF2Lc6TfV8=";
+      };
+    };
 
     buildFeatures = allFeatures;
 
