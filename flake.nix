@@ -14,13 +14,20 @@
       default = self.nixosModules.nixos-core;
     };
 
+    overlays = {
+      nixos-core = final: _prev: {
+        nixos-core = final.callPackage ./nix/package.nix {};
+      };
+      default = self.overlays.nixos-core;
+    };
+
     checks = forEachSystem (system: let
       pkgs = pkgsForEach system;
     in
       import ./nix/checks self {inherit pkgs;});
 
     packages = forEachSystem (system: {
-      nixos-core = (pkgsForEach system).callPackage ./nix/package.nix {};
+      inherit ((pkgsForEach system).extend self.overlays.default) nixos-core;
       default = self.packages.${system}.nixos-core;
     });
 
