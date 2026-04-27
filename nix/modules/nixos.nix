@@ -8,6 +8,9 @@ self: {
   inherit (lib.options) mkOption mkEnableOption mkPackageOption literalExpression;
   inherit (lib.types) package lines;
 
+  # Keep the default package on the caller's pkgs, including cross stdenvs.
+  pkgsWithOverlay = pkgs.extend self.overlays.nixos-core;
+
   udev = config.systemd.package;
   extra-utils = config.system.build.extraUtils;
   useHostResolvConf = config.networking.resolvconf.enable && config.networking.useHostResolvConf;
@@ -268,7 +271,9 @@ self: {
 in {
   options.system.nixos-core = {
     enable = mkEnableOption "nixos-core multi-call binary";
-    package = mkPackageOption self.packages.${pkgs.stdenv.hostPlatform.system} ["nixos-core"] {};
+    package = mkPackageOption pkgsWithOverlay "nixos-core" {
+      pkgsText = "pkgs.extend nixos-core.overlays.nixos-core";
+    };
 
     stateDir = mkOption {
       type = lib.types.str;
