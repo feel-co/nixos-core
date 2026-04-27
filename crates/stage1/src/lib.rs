@@ -373,6 +373,60 @@ impl<'a> Mount<'a> {
       .unwrap_or(false)
   }
 
+  fn is_bind_mount(&self) -> bool {
+    self.fstype == Some("bind")
+      || self
+        .options
+        .raw
+        .iter()
+        .any(|opt| opt == "bind" || opt == "rbind")
+  }
+
+  fn apply_filesystem(&self, dm: &DeviceManager) -> Result<()> {
+    match self.fstype {
+      Some("zfs") => {
+        log_message(
+          &format!(
+            "Skipping mount of {} (handled by kernel)",
+            self.fstype.unwrap_or("auto")
+          ),
+          true,
+        );
+        return Ok(());
+      },
+      Some("bcachefs") => {
+        for component in self.source.split(':') {
+          wait_for_device(component, 30, dm).ok();
+        }
+        return mount_bcachefs(
+          self.source,
+          self.target,
+          &self.options.raw,
+          Some(Duration::from_secs(30)),
+        );
+      },
+      Some("bind") => {
+        self.mount_bind().with_context(|| {
+          format!("Failed to bind mount {} to {:?}", self.source, self.target)
+        })?;
+      },
+      Some("overlay") => {
+        self.mount_overlay().with_context(|| {
+          format!("Failed to mount overlay at {:?}", self.target)
+        })?;
+      },
+      _ => self.apply()?,
+    }
+
+    if self.is_bind_mount() {
+      self.remount_bind().with_context(|| {
+        format!("Failed to remount {:?} with security options", self.target)
+      })?;
+    }
+
+    Ok(())
+  }
+
   fn apply(&self) -> Result<()> {
     let (flags, data) = self.options.parse_for_mount();
     if self.uses_loop_device() {
@@ -422,6 +476,17 @@ impl<'a> Mount<'a> {
   ) -> Result<()> {
     mount(Some(source), self.target, self.mount_fstype(), flags, data)
       .map_err(Into::into)
+  }
+
+  fn mount_bind(&self) -> Result<()> {
+    mount(
+      Some(self.source),
+      self.target,
+      None::<&str>,
+      MsFlags::MS_BIND,
+      None::<&str>,
+    )
+    .map_err(Into::into)
   }
 
   fn mount_overlay(&self) -> Result<()> {
@@ -1267,73 +1332,7 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
     Some(fs_info.fstype.as_str()),
     MountOptions::from_slice(&fs_info.options),
   );
-
-  // Handle special filesystem types
-  match fs_info.fstype.as_str() {
-    "zfs" => {
-      // Mounted by the ZFS userspace tools.
-      log_message(
-        &format!("Skipping mount of {} (handled by kernel)", fs_info.fstype),
-        true,
-      );
-      return Ok(());
-    },
-    "bcachefs" => {
-      // bcachefs device strings may be colon-separated multi-device paths
-      // (e.g. "/dev/sda1:/dev/sda2"). Wait for each component individually
-      // before handing the full joined string to mount.bcachefs.
-      for component in fs_info.device.split(':') {
-        wait_for_device(component, 30, dm).ok();
-      }
-      return mount_bcachefs(
-        &fs_info.device,
-        &fs_info.mountpoint,
-        &fs_info.options,
-        Some(Duration::from_secs(30)),
-      );
-    },
-    "bind" => {
-      // Bind mount
-      mount(
-        Some(fs_info.device.as_str()),
-        &fs_info.mountpoint,
-        None::<&str>,
-        MsFlags::MS_BIND,
-        None::<&str>,
-      )
-      .with_context(|| {
-        format!(
-          "Failed to bind mount {} to {:?}",
-          fs_info.device, fs_info.mountpoint
-        )
-      })?;
-    },
-    "overlay" => {
-      // Overlay mount options include lowerdir/upperdir/workdir and need
-      // preparatory directory creation before the mount syscall.
-      mount_request.mount_overlay().with_context(|| {
-        format!("Failed to mount overlay at {:?}", fs_info.mountpoint)
-      })?;
-    },
-    _ => mount_request.apply()?,
-  }
-
-  // The kernel silently ignores mount flags (nosuid, noexec, nodev, …) on the
-  // initial MS_BIND call. A separate remount is required to enforce them.
-  // The initrd script basically remounts after any bind/rbind mount, which we
-  // should match here.
-  let is_bind = fs_info.fstype == "bind"
-    || fs_info.options.iter().any(|o| o == "bind" || o == "rbind");
-  if is_bind {
-    mount_request.remount_bind().with_context(|| {
-      format!(
-        "Failed to remount {:?} with security options",
-        fs_info.mountpoint
-      )
-    })?;
-  }
-
-  Ok(())
+  mount_request.apply_filesystem(dm)
 }
 
 /// Invoke `mount.bcachefs <device> <mountpoint> [-o opts]`, retrying until
