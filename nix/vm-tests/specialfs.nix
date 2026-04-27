@@ -3,6 +3,17 @@
   nixosModule,
   testCommons,
 }: let
+  # Take a pkgs argument so to use the node's own pkgs in case we decide
+  # to modify then node's own pkgs with overlays etc.
+  squashfsImage = {pkgs}:
+    pkgs.runCommand "stage1-loop-squashfs.img" {
+      nativeBuildInputs = [pkgs.squashfsTools];
+    } ''
+      mkdir root
+      printf '%s\n' loop-mount-ok > root/marker
+      mksquashfs root $out -noappend -all-root
+    '';
+
   mkMachine = {withSystemd}: {
     imports = [nixosModule testCommons];
     system.nixos-core.enable = true;
@@ -43,6 +54,28 @@ in
           device = "/bind-src";
           fsType = "none";
           options = ["bind"];
+          neededForBoot = true;
+        };
+      };
+
+      loopFileMount = {pkgs, ...}: {
+        imports = [nixosModule testCommons];
+        system.nixos-core.enable = true;
+        boot = {
+          loader.grub.enable = false;
+          supportedFilesystems = ["squashfs"]; # FIXME: see if this necessary
+          initrd = {
+            systemd.enable = false;
+            availableKernelModules = ["loop" "squashfs"];
+
+            extraFiles."/loop.squashfs".source = squashfsImage {inherit pkgs;};
+          };
+        };
+
+        virtualisation.fileSystems."/mnt/loop-image" = {
+          device = "/loop.squashfs";
+          fsType = "squashfs";
+          options = ["ro"];
           neededForBoot = true;
         };
       };
@@ -107,6 +140,23 @@ in
       with subtest("file bind-mount: no stage1 mount warnings"):
         fileBindMount.fail(
           "journalctl -b --no-pager | grep -F 'Warning: failed to mount'"
+        )
+
+      loopFileMount.start()
+      loopFileMount.wait_for_unit("multi-user.target")
+
+      with subtest("loop-backed squashfs from initrd mounts during stage1"):
+        loopFileMount.succeed("mountpoint -q /mnt/loop-image")
+        fstype = loopFileMount.succeed(
+          "findmnt -n -o FSTYPE /mnt/loop-image"
+        ).strip()
+        assert fstype == "squashfs", f"expected squashfs, got {fstype!r}"
+        content = loopFileMount.succeed("cat /mnt/loop-image/marker").strip()
+        assert content == "loop-mount-ok", f"got {content!r}"
+
+      with subtest("loop-backed squashfs mount produces no stage1 warnings"):
+        loopFileMount.fail(
+          "journalctl -b --no-pager | grep -F 'Warning: failed to mount /mnt/loop-image'"
         )
     '';
   }
