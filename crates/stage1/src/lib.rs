@@ -4,7 +4,10 @@ use std::{
   ffi::CString,
   fs::{self, File, OpenOptions, Permissions},
   io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
-  os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
+  os::{
+    fd::AsRawFd,
+    unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
+  },
   path::{Path, PathBuf},
   process::{Command, ExitStatus, Stdio},
   thread,
@@ -18,6 +21,33 @@ use nix::{
   sys::stat::{Mode, SFlag, makedev, mknod},
   unistd::{chdir, chroot, execv, getpid},
 };
+
+const LO_FLAGS_READ_ONLY: u32 = 1;
+const LO_FLAGS_AUTOCLEAR: u32 = 4;
+const LOOP_SET_FD: libc::c_ulong = 0x4C00;
+const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
+const LOOP_SET_STATUS64: libc::c_ulong = 0x4C04;
+const LOOP_CTL_GET_FREE: libc::c_ulong = 0x4C82;
+const LO_NAME_SIZE: usize = 64;
+const LO_KEY_SIZE: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LoopInfo64 {
+  lo_device:           u64,
+  lo_inode:            u64,
+  lo_rdevice:          u64,
+  lo_offset:           u64,
+  lo_sizelimit:        u64,
+  lo_number:           u32,
+  lo_encrypt_type:     u32,
+  lo_encrypt_key_size: u32,
+  lo_flags:            u32,
+  lo_file_name:        [u8; LO_NAME_SIZE],
+  lo_crypt_name:       [u8; LO_NAME_SIZE],
+  lo_encrypt_key:      [u8; LO_KEY_SIZE],
+  lo_init:             [u64; 2],
+}
 
 #[derive(Debug)]
 enum DeviceManager {
@@ -258,6 +288,234 @@ struct FsInfo {
   mountpoint: PathBuf,
   fstype:     String,
   options:    Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct MountOptions {
+  raw: Vec<String>,
+}
+
+impl MountOptions {
+  fn from_vec(raw: Vec<String>) -> Self {
+    Self { raw }
+  }
+
+  fn from_slice(raw: &[String]) -> Self {
+    Self { raw: raw.to_vec() }
+  }
+
+  fn from_csv(raw: &str) -> Self {
+    Self {
+      raw: raw
+        .split(',')
+        .filter(|opt| !opt.is_empty())
+        .map(String::from)
+        .collect(),
+    }
+  }
+
+  fn parse_for_mount(&self) -> (MsFlags, Option<String>) {
+    let filtered = self
+      .raw
+      .iter()
+      .map(String::as_str)
+      .filter(|opt| !opt.is_empty() && !opt.starts_with("x-") && *opt != "loop")
+      .collect::<Vec<_>>();
+    parse_mount_options(filtered.iter().copied())
+  }
+
+  fn raw_for_mount(&self) -> Vec<&str> {
+    self
+      .raw
+      .iter()
+      .map(String::as_str)
+      .filter(|opt| !opt.is_empty() && !opt.starts_with("x-") && *opt != "loop")
+      .collect()
+  }
+}
+
+#[derive(Debug, Clone)]
+struct Mount<'a> {
+  source:  &'a str,
+  target:  &'a Path,
+  fstype:  Option<&'a str>,
+  options: MountOptions,
+}
+
+impl<'a> Mount<'a> {
+  fn new(
+    source: &'a str,
+    target: &'a Path,
+    fstype: Option<&'a str>,
+    options: MountOptions,
+  ) -> Self {
+    Self {
+      source,
+      target,
+      fstype,
+      options,
+    }
+  }
+
+  fn source_path(&self) -> &Path {
+    Path::new(self.source)
+  }
+
+  fn mount_fstype(&self) -> Option<&str> {
+    self
+      .fstype
+      .filter(|value| !value.is_empty() && *value != "auto")
+  }
+
+  fn uses_loop_device(&self) -> bool {
+    fs::metadata(self.source_path())
+      .map(|metadata| metadata.file_type().is_file())
+      .unwrap_or(false)
+  }
+
+  fn apply(&self) -> Result<()> {
+    let (flags, data) = self.options.parse_for_mount();
+    if self.uses_loop_device() {
+      log_message(
+        &format!(
+          "Mounting regular file {} via loop device at {:?}",
+          self.source, self.target
+        ),
+        true,
+      );
+      let loop_device = self
+        .attach_loop_device(flags.contains(MsFlags::MS_RDONLY))
+        .with_context(|| {
+          format!("Failed to configure loop device for {}", self.source)
+        })?;
+      self
+        .mount_with_source(loop_device.as_str(), flags, data.as_deref())
+        .with_context(|| {
+          format!(
+            "Failed to mount {} ({}) via {} at {:?}",
+            self.source,
+            self.mount_fstype().unwrap_or("auto"),
+            loop_device,
+            self.target
+          )
+        })?;
+      return Ok(());
+    }
+
+    self
+      .mount_with_source(self.source, flags, data.as_deref())
+      .with_context(|| {
+        format!(
+          "Failed to mount {} ({}) at {:?}",
+          self.source,
+          self.mount_fstype().unwrap_or("auto"),
+          self.target
+        )
+      })
+  }
+
+  fn mount_with_source(
+    &self,
+    source: &str,
+    flags: MsFlags,
+    data: Option<&str>,
+  ) -> Result<()> {
+    mount(Some(source), self.target, self.mount_fstype(), flags, data)
+      .map_err(Into::into)
+  }
+
+  fn mount_overlay(&self) -> Result<()> {
+    let filtered_opts = self.options.raw_for_mount();
+    for opt in &filtered_opts {
+      for prefix in &["upperdir=", "workdir="] {
+        if let Some(path) = opt.strip_prefix(prefix) {
+          fs::create_dir_all(path).ok();
+        }
+      }
+    }
+    mount(
+      Some("overlay"),
+      self.target,
+      Some("overlay"),
+      MsFlags::empty(),
+      Some(filtered_opts.join(",").as_str()),
+    )
+    .map_err(Into::into)
+  }
+
+  fn remount_bind(&self) -> Result<()> {
+    let (flags, data) = self.options.parse_for_mount();
+    mount(
+      None::<&str>,
+      self.target,
+      None::<&str>,
+      MsFlags::MS_REMOUNT | MsFlags::MS_BIND | flags,
+      data.as_deref(),
+    )
+    .map_err(Into::into)
+  }
+
+  fn attach_loop_device(&self, read_only: bool) -> Result<String> {
+    let backing_file = OpenOptions::new()
+      .read(true)
+      .write(!read_only)
+      .open(self.source_path())
+      .with_context(|| {
+        format!("Failed to open loop backing file {}", self.source)
+      })?;
+    let loop_control = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .open("/dev/loop-control")
+      .context("Failed to open /dev/loop-control")?;
+
+    let loop_number =
+      unsafe { libc::ioctl(loop_control.as_raw_fd(), LOOP_CTL_GET_FREE, 0) };
+    if loop_number < 0 {
+      return Err(std::io::Error::last_os_error())
+        .context("LOOP_CTL_GET_FREE failed");
+    }
+
+    let loop_path = format!("/dev/loop{loop_number}");
+    let loop_device = OpenOptions::new()
+      .read(true)
+      .write(true)
+      .open(&loop_path)
+      .with_context(|| format!("Failed to open loop device {loop_path}"))?;
+
+    let set_fd = unsafe {
+      libc::ioctl(
+        loop_device.as_raw_fd(),
+        LOOP_SET_FD,
+        backing_file.as_raw_fd(),
+      )
+    };
+    if set_fd < 0 {
+      return Err(std::io::Error::last_os_error())
+        .with_context(|| format!("LOOP_SET_FD failed for {loop_path}"));
+    }
+
+    let mut loop_info: LoopInfo64 = unsafe { std::mem::zeroed() };
+    loop_info.lo_flags = LO_FLAGS_AUTOCLEAR;
+    if read_only {
+      loop_info.lo_flags |= LO_FLAGS_READ_ONLY;
+    }
+    let file_name = self.source_path().as_os_str().as_encoded_bytes();
+    let copy_len = file_name.len().min(loop_info.lo_file_name.len());
+    loop_info.lo_file_name[..copy_len].copy_from_slice(&file_name[..copy_len]);
+
+    let set_status = unsafe {
+      libc::ioctl(loop_device.as_raw_fd(), LOOP_SET_STATUS64, &loop_info)
+    };
+    if set_status < 0 {
+      let err = std::io::Error::last_os_error();
+      let _ = unsafe { libc::ioctl(loop_device.as_raw_fd(), LOOP_CLR_FD, 0) };
+      return Err(err)
+        .with_context(|| format!("LOOP_SET_STATUS64 failed for {loop_path}"));
+    }
+
+    Ok(loop_path)
+  }
 }
 
 impl KernelCmdline {
@@ -1003,6 +1261,13 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
     })?;
   }
 
+  let mount_request = Mount::new(
+    &fs_info.device,
+    &fs_info.mountpoint,
+    Some(fs_info.fstype.as_str()),
+    MountOptions::from_slice(&fs_info.options),
+  );
+
   // Handle special filesystem types
   match fs_info.fstype.as_str() {
     "zfs" => {
@@ -1044,50 +1309,13 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
       })?;
     },
     "overlay" => {
-      // Overlay mount - options are in the format:
-      // lowerdir=...,upperdir=...,workdir=... Filter x- options (kernel
-      // doesn't understand them) and ensure upperdir/workdir exist.
-      let filtered_opts: Vec<&str> = fs_info
-        .options
-        .iter()
-        .filter(|o| !o.starts_with("x-"))
-        .map(std::string::String::as_str)
-        .collect();
-      for opt in &filtered_opts {
-        for prefix in &["upperdir=", "workdir="] {
-          if let Some(path) = opt.strip_prefix(prefix) {
-            fs::create_dir_all(path).ok();
-          }
-        }
-      }
-      mount(
-        Some("overlay"),
-        &fs_info.mountpoint,
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(filtered_opts.join(",").as_str()),
-      )
-      .with_context(|| {
+      // Overlay mount options include lowerdir/upperdir/workdir and need
+      // preparatory directory creation before the mount syscall.
+      mount_request.mount_overlay().with_context(|| {
         format!("Failed to mount overlay at {:?}", fs_info.mountpoint)
       })?;
     },
-    _ => {
-      let (flags, opts_str) =
-        parse_mount_options(fs_info.options.iter().map(String::as_str));
-      mount(
-        Some(fs_info.device.as_str()),
-        &fs_info.mountpoint,
-        Some(fs_info.fstype.as_str()),
-        flags,
-        opts_str.as_deref(),
-      )
-      .with_context(|| {
-        format!(
-          "Failed to mount {} ({}) at {:?}",
-          fs_info.device, fs_info.fstype, fs_info.mountpoint
-        )
-      })?;
-    },
+    _ => mount_request.apply()?,
   }
 
   // The kernel silently ignores mount flags (nosuid, noexec, nodev, …) on the
@@ -1097,16 +1325,7 @@ fn mount_filesystem(fs_info: &FsInfo, dm: &DeviceManager) -> Result<()> {
   let is_bind = fs_info.fstype == "bind"
     || fs_info.options.iter().any(|o| o == "bind" || o == "rbind");
   if is_bind {
-    let (remount_flags, remount_data) =
-      parse_mount_options(fs_info.options.iter().map(String::as_str));
-    mount(
-      None::<&str>,
-      &fs_info.mountpoint,
-      None::<&str>,
-      MsFlags::MS_REMOUNT | MsFlags::MS_BIND | remount_flags,
-      remount_data.as_deref(),
-    )
-    .with_context(|| {
+    mount_request.remount_bind().with_context(|| {
       format!(
         "Failed to remount {:?} with security options",
         fs_info.mountpoint
@@ -1392,15 +1611,13 @@ fn mount_root(
   // Mount the root filesystem
   fs::create_dir_all(target_root)?;
 
-  let (flags, opts_str) =
-    parse_mount_options(mount_opts.iter().map(String::as_str));
-  mount(
-    Some(mount_device),
+  Mount::new(
+    mount_device,
     target_root,
     Some(fstype.as_str()),
-    flags,
-    opts_str.as_deref(),
+    MountOptions::from_vec(mount_opts),
   )
+  .apply()
   .with_context(|| {
     format!("Failed to mount root filesystem {mount_device} at {target_root:?}")
   })?;
@@ -2371,15 +2588,14 @@ pub fn run(args: &[String]) -> Result<()> {
       }
       fs::create_dir_all(&target)?;
 
-      let (flags, data) = parse_mount_options(options.split(','));
-      let opts = data.as_deref();
-      if let Err(e) = mount(
-        Some(device.as_str()),
+      let mount_result = Mount::new(
+        device,
         &target,
         Some(fstype.as_str()),
-        flags,
-        opts,
-      ) {
+        MountOptions::from_csv(options),
+      )
+      .apply();
+      if let Err(e) = mount_result {
         fail(
           &format!(
             "Early mount script: failed to mount {device} at {target:?}: {e}"
