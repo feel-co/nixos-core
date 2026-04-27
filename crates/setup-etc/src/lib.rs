@@ -59,7 +59,11 @@ pub fn run(args: &[String]) -> Result<()> {
   // Step 5: Write to a sibling temp path so the rename in step 7 is atomic.
   let manifest_path = get_etc_manifest();
   let manifest_tmp = PathBuf::from(format!("{}.new", manifest_path.display()));
-  fs::create_dir_all(manifest_path.parent().unwrap())?;
+  fs::create_dir_all(
+    manifest_path
+      .parent()
+      .expect("manifest path always has a parent"),
+  )?;
   fs::write(&manifest_tmp, &manifest_content)
     .context("Failed to write manifest")?;
 
