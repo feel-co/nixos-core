@@ -437,11 +437,15 @@ impl<'a> Mount<'a> {
         ),
         true,
       );
-      let loop_device = self
+      let (loop_device, _loop_fd) = self
         .attach_loop_device(flags.contains(MsFlags::MS_RDONLY))
         .with_context(|| {
           format!("Failed to configure loop device for {}", self.source)
         })?;
+
+      // Keep _loop_fd alive until *after* mount() so LO_FLAGS_AUTOCLEAR
+      // does not fire before the kernel has taken its own reference via
+      // blkdev_get_by_path -> lo_open.
       self
         .mount_with_source(loop_device.as_str(), flags, data.as_deref())
         .with_context(|| {
@@ -520,7 +524,7 @@ impl<'a> Mount<'a> {
     .map_err(Into::into)
   }
 
-  fn attach_loop_device(&self, read_only: bool) -> Result<String> {
+  fn attach_loop_device(&self, read_only: bool) -> Result<(String, File)> {
     let backing_file = OpenOptions::new()
       .read(true)
       .write(!read_only)
@@ -579,7 +583,7 @@ impl<'a> Mount<'a> {
         .with_context(|| format!("LOOP_SET_STATUS64 failed for {loop_path}"));
     }
 
-    Ok(loop_path)
+    Ok((loop_path, loop_device))
   }
 }
 
