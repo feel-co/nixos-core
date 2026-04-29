@@ -46,36 +46,36 @@ pub fn run(args: &Args) -> Result<()> {
       "stage-2-init: running in systemd stage 1 mode, skipping early mount \
        setup",
     );
-  } else {
-    if has_kernel_cmdline_flag("boot.debugtrace") {
-      // Shell equivalent is `set -x`: dump each command to stderr. Rust has
-      // no equivalent to bash xtrace, so we approximate it two ways:
-      //   - Bump log level so every info!/debug! call reaches kmsg.
-      //   - Export SHELLOPTS=xtrace so any bash descendant (activation scripts,
-      //     post-boot hook, earlyMountScript /bin/sh wrappers) picks up xtrace
-      //     at startup.
-      //   - Emit a bash-style "+ argv ..." line before every subprocess we
-      //     spawn from stage 2 itself. See trace_spawn().
-      log::set_max_level(log::LevelFilter::Trace);
-      // SAFETY: single-threaded environment tweak before any child forks.
-      unsafe {
-        std::env::set_var("SHELLOPTS", "xtrace");
-      }
-      log_message(
-        log_dest.as_deref(),
-        "stage-2-init: boot.debugtrace set; xtrace + subprocess tracing \
-         enabled",
-      );
+  } else if has_kernel_cmdline_flag("boot.debugtrace") {
+    // Shell equivalent is `set -x`: dump each command to stderr. Rust has
+    // no equivalent to bash xtrace, so we approximate it two ways:
+    //   - Bump log level so every info!/debug! call reaches kmsg.
+    //   - Export SHELLOPTS=xtrace so any bash descendant (activation scripts,
+    //     post-boot hook, earlyMountScript /bin/sh wrappers) picks up xtrace at
+    //     startup.
+    //   - Emit a bash-style "+ argv ..." line before every subprocess we spawn
+    //     from stage 2 itself. See trace_spawn().
+    log::set_max_level(log::LevelFilter::Trace);
+    // SAFETY: single-threaded environment tweak before any child forks.
+    unsafe {
+      std::env::set_var("SHELLOPTS", "xtrace");
     }
+    log_message(
+      log_dest.as_deref(),
+      "stage-2-init: boot.debugtrace set; xtrace + subprocess tracing enabled",
+    );
+  }
 
-    // Stage 2 may be entered directly (no stage 1) - e.g. on systems where
-    // the bootloader invokes /sbin/init or the initrd handoff skipped the
-    // remount. stage-2-init.sh does the same remount unconditionally outside
-    // of containers (systemd / nspawn exports $container to mark those).
-    if std::env::var_os("container").is_none() {
-      remount_root_rw(&log_dest).context("Failed to remount / rw")?;
-    }
+  // Stage 2 may be entered directly (no stage 1) - e.g. on systems where
+  // the bootloader invokes /sbin/init or the initrd handoff skipped the
+  // remount. stage-2-init.sh does the same remount unconditionally outside
+  // of containers. Under IN_NIXOS_SYSTEMD_STAGE1=true, systemd's initrd
+  // handoff can also leave /sysroot read-only until prepare-root runs.
+  if std::env::var_os("container").is_none() {
+    remount_root_rw(&log_dest).context("Failed to remount / rw")?;
+  }
 
+  if !in_systemd_stage1 {
     // Upstream `source @earlyMountScript@` path. If the caller supplied the
     // nix-generated script we sourced every specialFileSystems entry via it;
     // otherwise fall back to the tiny hardcoded set, logging that the caller
@@ -400,17 +400,44 @@ fn has_kernel_cmdline_flag(flag: &str) -> bool {
 
 fn remount_root_rw(log_dest: &Option<std::path::PathBuf>) -> Result<()> {
   let root = Path::new("/");
-  // /proc/mounts isn't available yet in the no-stage-1 path; skip the
-  // already-rw check and let the remount be idempotent.
+  // /proc/mounts is unavailable in some no-stage-1 boots. In that case, fall
+  // back to the same raw remount that the old no-stage-1 path used.
+  let flags = get_mount_options(root)
+    .map(|opts| remount_flags_from_options(&opts))
+    .unwrap_or_else(|_| MsFlags::empty());
+
   log_message(log_dest.as_deref(), "stage-2-init: remounting / read-write");
   mount(
     None::<&str>,
     root,
     None::<&str>,
-    MsFlags::MS_REMOUNT,
+    MsFlags::MS_REMOUNT | flags,
     None::<&str>,
   )
   .context("mount -o remount,rw / failed")
+}
+
+fn remount_flags_from_options(opts: &[String]) -> MsFlags {
+  let mut flags = MsFlags::empty();
+
+  for opt in opts {
+    match opt.as_str() {
+      "nosuid" => flags |= MsFlags::MS_NOSUID,
+      "nodev" => flags |= MsFlags::MS_NODEV,
+      "noexec" => flags |= MsFlags::MS_NOEXEC,
+      "sync" => flags |= MsFlags::MS_SYNCHRONOUS,
+      "noatime" => flags |= MsFlags::MS_NOATIME,
+      "nodiratime" => flags |= MsFlags::MS_NODIRATIME,
+      "relatime" => flags |= MsFlags::MS_RELATIME,
+      "strictatime" => flags |= MsFlags::MS_STRICTATIME,
+      "lazytime" => flags |= MsFlags::MS_LAZYTIME,
+      "dirsync" => flags |= MsFlags::MS_DIRSYNC,
+      "ro" | "rw" => {},
+      _ => {},
+    }
+  }
+
+  flags
 }
 
 fn mount_special_filesystems(
@@ -899,10 +926,11 @@ pub fn exec_systemd(systemd_path: &Path, systemd_args: &[String]) -> ! {
 
   std::process::exit(1);
 }
-
 #[cfg(test)]
 mod tests {
   use std::os::unix::fs::PermissionsExt;
+
+  use nix::mount::MsFlags;
 
   use super::*;
 
@@ -961,5 +989,20 @@ mod tests {
       result.is_ok(),
       "expected Ok when activate script exists and strict_activation=true"
     );
+  }
+
+  #[test]
+  fn rw_remount_clears_ro_only() {
+    let opts = ["ro", "nosuid", "nodev", "noexec", "relatime", "lazytime"]
+      .map(str::to_owned);
+
+    let flags = remount_flags_from_options(&opts);
+
+    assert!(flags.contains(MsFlags::MS_NOSUID));
+    assert!(flags.contains(MsFlags::MS_NODEV));
+    assert!(flags.contains(MsFlags::MS_NOEXEC));
+    assert!(flags.contains(MsFlags::MS_RELATIME));
+    assert!(flags.contains(MsFlags::MS_LAZYTIME));
+    assert!(!flags.contains(MsFlags::MS_RDONLY));
   }
 }

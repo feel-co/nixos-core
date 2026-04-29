@@ -6,18 +6,46 @@
 mkTest ({nodes, ...}: {
   name = "nixos-core-systemd-initrd";
 
-  nodes.machine = {
-    imports = [nixosModule testCommons];
-    system.nixos-core.enable = true;
-    boot = {
-      loader.grub.enable = false;
+  nodes = {
+    machine = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot = {
+        loader.grub.enable = false;
 
-      # Force systemd initrd; nixos-core's stage1 is a no-op here. Systemd basically
-      # owns all of stage1, but stage2/activation/etc components still apply.
-      initrd.systemd.enable = true;
+        # Force systemd initrd; nixos-core's stage1 is a no-op here.
+        # Systemd owns stage1, but stage2/activation/etc still apply.
+        initrd.systemd.enable = true;
 
-      # Marker written by stage2's postBootCommands hook.
-      postBootCommands = "touch /etc/post-boot-ran";
+        # Marker written by stage2's postBootCommands hook.
+        postBootCommands = "touch /etc/post-boot-ran";
+      };
+    };
+
+    readOnlySysroot = {
+      imports = [nixosModule testCommons];
+      system.nixos-core.enable = true;
+      boot = {
+        loader.grub.enable = false;
+        initrd.systemd.enable = true;
+
+        postBootCommands = ''
+          findmnt --direction backward --first-only --noheadings --output OPTIONS / \
+            > /etc/stage2-root-options
+          touch /etc/post-boot-ran
+        '';
+
+        initrd.systemd.services.nixos-core-remount-sysroot-ro = {
+          after = ["sysroot.mount" "systemd-tmpfiles-setup-sysroot.service"];
+          before = ["initrd-nixos-activation.service"];
+          requiredBy = ["initrd-nixos-activation.service"];
+          unitConfig.DefaultDependencies = false;
+          serviceConfig.Type = "oneshot";
+          script = ''
+            /bin/mount -o remount,ro /sysroot
+          '';
+        };
+      };
     };
   };
 
@@ -76,5 +104,15 @@ mkTest ({nodes, ...}: {
 
     with subtest("systemd state passing from initrd"):
       machine.succeed("systemd-analyze | grep -q '(initrd)'")
+
+    readOnlySysroot.start()
+    readOnlySysroot.wait_for_unit("multi-user.target")
+
+    with subtest("read-only sysroot: postBootCommands ran"):
+      readOnlySysroot.succeed("test -f /etc/post-boot-ran")
+
+    with subtest("read-only sysroot: stage2 remounted root rw"):
+      readOnlySysroot.succeed('grep -Eq "(^|,)rw(,|$)" /etc/stage2-root-options')
+      readOnlySysroot.fail('grep -Eq "(^|,)ro(,|$)" /etc/stage2-root-options')
   '';
 })
