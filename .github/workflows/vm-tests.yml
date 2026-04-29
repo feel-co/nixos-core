@@ -7,18 +7,29 @@ on:
     branches: [main]
 
 jobs:
+  discover:
+    name: Discover tests
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.list.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - id: list
+        run: |
+          tests=$(nix eval --json .#checks.x86_64-linux --apply builtins.attrNames)
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+
   vm-tests:
     name: VM Tests
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        test: [boot, etc, users]
+        test: ${{ fromJson(needs.discover.outputs.tests) }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-
+      - uses: cachix/install-nix-action@v31
       - name: Build ${{ matrix.test }} test
         run: nix build .#checks.x86_64-linux.${{ matrix.test }} -Lv
