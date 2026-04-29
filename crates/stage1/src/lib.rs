@@ -383,6 +383,16 @@ impl<'a> Mount<'a> {
   }
 
   fn apply_filesystem(&self, dm: &DeviceManager) -> Result<()> {
+    if self.is_bind_mount() {
+      self.mount_bind().with_context(|| {
+        format!("Failed to bind mount {} to {:?}", self.source, self.target)
+      })?;
+      self.remount_bind().with_context(|| {
+        format!("Failed to remount {:?} with security options", self.target)
+      })?;
+      return Ok(());
+    }
+
     match self.fstype {
       Some("zfs") => {
         log_message(
@@ -405,23 +415,12 @@ impl<'a> Mount<'a> {
           Some(Duration::from_secs(30)),
         );
       },
-      Some("bind") => {
-        self.mount_bind().with_context(|| {
-          format!("Failed to bind mount {} to {:?}", self.source, self.target)
-        })?;
-      },
       Some("overlay") => {
         self.mount_overlay().with_context(|| {
           format!("Failed to mount overlay at {:?}", self.target)
         })?;
       },
       _ => self.apply()?,
-    }
-
-    if self.is_bind_mount() {
-      self.remount_bind().with_context(|| {
-        format!("Failed to remount {:?} with security options", self.target)
-      })?;
     }
 
     Ok(())
@@ -525,6 +524,8 @@ impl<'a> Mount<'a> {
   }
 
   fn attach_loop_device(&self, read_only: bool) -> Result<(String, File)> {
+    load_module("loop").ok();
+
     let backing_file = OpenOptions::new()
       .read(true)
       .write(!read_only)
