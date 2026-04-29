@@ -138,6 +138,7 @@ All options can also be set via environment variables:
 - `POST_BOOT_COMMANDS` - Path to post-boot commands script
 - `USE_HOST_RESOLV_CONF` - Use host resolv.conf (set to any value)
 - `STAGE2_PATH` - PATH to set (default: "/run/current-system/sw/bin")
+- `STAGE2_STRICT_ACTIVATION` - Fail if `$systemConfig/activate` is missing (set to `true` or `false`)
 - `MODPROBE_BINARY` - Path to modprobe binary
 - `FIRMWARE_PATH` - Path to firmware directory
 - `ENV_BINARY` - Path to env binary (for --setup-fhs)

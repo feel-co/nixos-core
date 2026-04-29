@@ -119,14 +119,6 @@ pub fn run(args: &Args) -> Result<()> {
     );
   }
 
-  if !verify_nixos_toplevel(&args.system_config) {
-    warn!(
-      "system config at {} has no nixos-version; skipping activation",
-      args.system_config.display()
-    );
-    return Ok(());
-  }
-
   // Capture fds 1 and 2 from here on so activation, post-boot commands, and
   // anything they spawn also land in /dev/kmsg (or /run/log) - matches the
   // `exec > >(tee ...) 2>&1` block in stage-2-init.sh:110-122. The shell
@@ -152,8 +144,12 @@ pub fn run(args: &Args) -> Result<()> {
     }
   });
 
-  run_activation_script(&args.system_config, &log_dest)
-    .context("Activation script failed")?;
+  maybe_run_activation_script(
+    &args.system_config,
+    args.strict_activation,
+    &log_dest,
+  )
+  .context("Activation script failed")?;
 
   record_boot_config(&args.system_config, &log_dest)
     .context("Failed to record boot configuration")?;
@@ -749,8 +745,27 @@ fn run_activation_script(
   Ok(())
 }
 
-fn verify_nixos_toplevel(system_config: &Path) -> bool {
-  system_config.join("nixos-version").exists()
+fn maybe_run_activation_script(
+  system_config: &Path,
+  strict_activation: bool,
+  log_dest: &Option<std::path::PathBuf>,
+) -> Result<()> {
+  let activate_script = system_config.join("activate");
+  if !activate_script.exists() {
+    if strict_activation {
+      bail!(
+        "system config at {} has no activate script",
+        system_config.display()
+      );
+    }
+    warn!(
+      "system config at {} has no activate script; skipping activation",
+      system_config.display()
+    );
+    return Ok(());
+  }
+
+  run_activation_script(system_config, log_dest)
 }
 
 fn record_boot_config(
