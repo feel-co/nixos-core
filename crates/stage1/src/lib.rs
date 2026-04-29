@@ -382,6 +382,10 @@ impl<'a> Mount<'a> {
         .any(|opt| opt == "bind" || opt == "rbind")
   }
 
+  fn is_recursive_bind_mount(&self) -> bool {
+    self.options.raw.iter().any(|opt| opt == "rbind")
+  }
+
   fn apply_filesystem(&self, dm: &DeviceManager) -> Result<()> {
     if self.is_bind_mount() {
       self.mount_bind().with_context(|| {
@@ -482,11 +486,17 @@ impl<'a> Mount<'a> {
   }
 
   fn mount_bind(&self) -> Result<()> {
+    let flags = if self.is_recursive_bind_mount() {
+      MsFlags::MS_BIND | MsFlags::MS_REC
+    } else {
+      MsFlags::MS_BIND
+    };
+
     mount(
       Some(self.source),
       self.target,
       None::<&str>,
-      MsFlags::MS_BIND,
+      flags,
       None::<&str>,
     )
     .map_err(Into::into)
@@ -2380,6 +2390,7 @@ fn parse_mount_options<'a>(
       "strictatime" => flags |= MsFlags::MS_STRICTATIME,
       "lazytime" => flags |= MsFlags::MS_LAZYTIME,
       "bind" => flags |= MsFlags::MS_BIND,
+      "rbind" => flags |= MsFlags::MS_BIND | MsFlags::MS_REC,
       "remount" => flags |= MsFlags::MS_REMOUNT,
       "silent" => flags |= MsFlags::MS_SILENT,
       "dirsync" => flags |= MsFlags::MS_DIRSYNC,
