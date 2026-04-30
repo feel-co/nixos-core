@@ -92,6 +92,12 @@ pub struct Args {
   #[arg(long)]
   pub create_current_system: bool,
 
+  /// Fail if `$systemConfig/activate` is missing.
+  /// By default, missing activation script is a warning so non-NixOS targets
+  /// can still complete stage 2 and run post-boot hooks.
+  #[arg(long, env = "STAGE2_STRICT_ACTIVATION")]
+  pub strict_activation: bool,
+
   /// Path to the modprobe binary for --setup-modprobe
   #[arg(
     long,

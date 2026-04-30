@@ -119,14 +119,6 @@ pub fn run(args: &Args) -> Result<()> {
     );
   }
 
-  if !verify_nixos_toplevel(&args.system_config) {
-    warn!(
-      "system config at {} has no nixos-version; skipping activation",
-      args.system_config.display()
-    );
-    return Ok(());
-  }
-
   // Capture fds 1 and 2 from here on so activation, post-boot commands, and
   // anything they spawn also land in /dev/kmsg (or /run/log) - matches the
   // `exec > >(tee ...) 2>&1` block in stage-2-init.sh:110-122. The shell
@@ -152,8 +144,12 @@ pub fn run(args: &Args) -> Result<()> {
     }
   });
 
-  run_activation_script(&args.system_config, &log_dest)
-    .context("Activation script failed")?;
+  maybe_run_activation_script(
+    &args.system_config,
+    args.strict_activation,
+    &log_dest,
+  )
+  .context("Activation script failed")?;
 
   record_boot_config(&args.system_config, &log_dest)
     .context("Failed to record boot configuration")?;
@@ -749,8 +745,27 @@ fn run_activation_script(
   Ok(())
 }
 
-fn verify_nixos_toplevel(system_config: &Path) -> bool {
-  system_config.join("nixos-version").exists()
+fn maybe_run_activation_script(
+  system_config: &Path,
+  strict_activation: bool,
+  log_dest: &Option<std::path::PathBuf>,
+) -> Result<()> {
+  let activate_script = system_config.join("activate");
+  if !activate_script.exists() {
+    if strict_activation {
+      bail!(
+        "system config at {} has no activate script",
+        system_config.display()
+      );
+    }
+    warn!(
+      "system config at {} has no activate script; skipping activation",
+      system_config.display()
+    );
+    return Ok(());
+  }
+
+  run_activation_script(system_config, log_dest)
 }
 
 fn record_boot_config(
@@ -883,4 +898,68 @@ pub fn exec_systemd(systemd_path: &Path, systemd_args: &[String]) -> ! {
   let _ = Command::new("/bin/sh").exec();
 
   std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+  use std::os::unix::fs::PermissionsExt;
+
+  use super::*;
+
+  /// Create a tempdir with an executable `activate` script that exits 0.
+  fn tempdir_with_activate() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let script = dir.path().join("activate");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n")
+      .expect("failed to write activate script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+      .expect("failed to set permissions");
+    dir
+  }
+
+  #[test]
+  fn strict_activation_missing_script_errors() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let result = maybe_run_activation_script(dir.path(), true, &None);
+    assert!(
+      result.is_err(),
+      "expected error when activate script is missing and \
+       strict_activation=true"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+      msg.contains("no activate script"),
+      "unexpected error message: {msg}"
+    );
+  }
+
+  #[test]
+  fn non_strict_activation_missing_script_succeeds() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let result = maybe_run_activation_script(dir.path(), false, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script is missing and strict_activation=false"
+    );
+  }
+
+  #[test]
+  fn activation_runs_when_script_present() {
+    let dir = tempdir_with_activate();
+    let result = maybe_run_activation_script(dir.path(), false, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script exists and exits 0"
+    );
+  }
+
+  #[test]
+  fn strict_activation_runs_when_script_present() {
+    let dir = tempdir_with_activate();
+    let result = maybe_run_activation_script(dir.path(), true, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script exists and strict_activation=true"
+    );
+  }
 }
