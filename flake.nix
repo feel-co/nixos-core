@@ -8,6 +8,17 @@
     inherit (nixpkgs.lib) genAttrs systems;
     forEachSystem = genAttrs systems.doubles.linux;
     pkgsForEach = system: import nixpkgs { inherit system; };
+
+    # Build system -> matching pkgsCross musl target.
+    # powerpc-linux is omitted because packages.powerpc-linux is unevaluatable.
+    muslCrossAttr = {
+      x86_64-linux    = "musl64";
+      i686-linux      = "musl32";
+      aarch64-linux   = "aarch64-multiplatform-musl";
+      armv6l-linux    = "muslpi";
+      powerpc64-linux = "ppc64-musl";
+      riscv64-linux   = "riscv64-musl";
+    };
   in {
     nixosModules = {
       nixos-core = import ./nix/modules/nixos.nix self;
@@ -26,10 +37,17 @@
     in
       import ./nix/checks self {inherit pkgs;});
 
-    packages = forEachSystem (system: {
-      inherit ((pkgsForEach system).extend self.overlays.default) nixos-core;
-      default = self.packages.${system}.nixos-core;
-    });
+    packages = forEachSystem (system: let
+      pkgs = pkgsForEach system;
+      muslAttr = muslCrossAttr.${system} or null;
+    in
+      {
+        inherit (pkgs.extend self.overlays.default) nixos-core;
+        default = self.packages.${system}.nixos-core;
+      }
+      // nixpkgs.lib.optionalAttrs (muslAttr != null) {
+        nixos-core-musl = (pkgs.pkgsCross.${muslAttr}.extend self.overlays.default).nixos-core;
+      });
 
     devShells = forEachSystem (system: {
       default = (pkgsForEach system).callPackage ./nix/shell.nix {};
