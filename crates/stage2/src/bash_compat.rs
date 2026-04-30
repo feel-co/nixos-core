@@ -899,3 +899,67 @@ pub fn exec_systemd(systemd_path: &Path, systemd_args: &[String]) -> ! {
 
   std::process::exit(1);
 }
+
+#[cfg(test)]
+mod tests {
+  use std::os::unix::fs::PermissionsExt;
+
+  use super::*;
+
+  /// Create a tempdir with an executable `activate` script that exits 0.
+  fn tempdir_with_activate() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let script = dir.path().join("activate");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n")
+      .expect("failed to write activate script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+      .expect("failed to set permissions");
+    dir
+  }
+
+  #[test]
+  fn strict_activation_missing_script_errors() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let result = maybe_run_activation_script(dir.path(), true, &None);
+    assert!(
+      result.is_err(),
+      "expected error when activate script is missing and \
+       strict_activation=true"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+      msg.contains("no activate script"),
+      "unexpected error message: {msg}"
+    );
+  }
+
+  #[test]
+  fn non_strict_activation_missing_script_succeeds() {
+    let dir = tempfile::tempdir().expect("failed to create tempdir");
+    let result = maybe_run_activation_script(dir.path(), false, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script is missing and strict_activation=false"
+    );
+  }
+
+  #[test]
+  fn activation_runs_when_script_present() {
+    let dir = tempdir_with_activate();
+    let result = maybe_run_activation_script(dir.path(), false, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script exists and exits 0"
+    );
+  }
+
+  #[test]
+  fn strict_activation_runs_when_script_present() {
+    let dir = tempdir_with_activate();
+    let result = maybe_run_activation_script(dir.path(), true, &None);
+    assert!(
+      result.is_ok(),
+      "expected Ok when activate script exists and strict_activation=true"
+    );
+  }
+}
