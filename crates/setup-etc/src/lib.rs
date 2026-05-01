@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use log::{info, warn};
 use smfh_core::manifest::{File as ManifestFile, FileKind, Manifest};
 
 /// Update /etc from the current NixOS configuration
@@ -86,9 +87,7 @@ pub fn run(args: &[String]) -> Result<()> {
   })();
 
   if let Err(ref e) = diff_result {
-    eprintln!(
-      "warning: manifest activation failed, cleaning up temp file: {e}"
-    );
+    warn!("manifest activation failed, cleaning up temp file: {e}");
     let _ = fs::remove_file(&manifest_tmp);
   }
   diff_result?;
@@ -158,10 +157,7 @@ fn build_etc_manifest(
     if let Some(parent) = target.parent()
       && let Err(e) = fs::create_dir_all(parent)
     {
-      eprintln!(
-        "warning: failed to create parent dir for {}: {e}",
-        target.display()
-      );
+      warn!("failed to create parent dir for {}: {e}", target.display());
       continue;
     }
 
@@ -181,16 +177,13 @@ fn build_etc_manifest(
     if current_is_symlink && target_is_dir {
       if is_fully_static(&target, etc_static) {
         if let Err(e) = fs::remove_dir_all(&target) {
-          eprintln!(
-            "warning: failed to remove static dir {}: {e}",
-            target.display()
-          );
+          warn!("failed to remove static dir {}: {e}", target.display());
           continue;
         }
       } else {
-        eprintln!(
-          "warning: not replacing /etc/{relative_str} (non-static directory) \
-           with a symlink"
+        warn!(
+          "not replacing /etc/{relative_str} (non-static directory) with a \
+           symlink"
         );
         continue;
       }
@@ -204,7 +197,7 @@ fn build_etc_manifest(
       let mode_str = match fs::read_to_string(&mode_file) {
         Ok(s) => s,
         Err(e) => {
-          eprintln!("warning: failed to read {}: {e}", mode_file.display());
+          warn!("failed to read {}: {e}", mode_file.display());
           continue;
         },
       };
@@ -216,10 +209,7 @@ fn build_etc_manifest(
         let link_target = match fs::read_link(&current) {
           Ok(t) => t,
           Err(e) => {
-            eprintln!(
-              "warning: failed to read symlink {}: {e}",
-              current.display()
-            );
+            warn!("failed to read symlink {}: {e}", current.display());
             continue;
           },
         };
@@ -240,10 +230,7 @@ fn build_etc_manifest(
         let mode = match u32::from_str_radix(mode_str, 8) {
           Ok(m) => m,
           Err(e) => {
-            eprintln!(
-              "warning: invalid mode {mode_str:?} in {}: {e}",
-              mode_file.display()
-            );
+            warn!("invalid mode {mode_str:?} in {}: {e}", mode_file.display());
             continue;
           },
         };
@@ -262,8 +249,8 @@ fn build_etc_manifest(
         let uid: u32 = match resolve_id(uid_str.trim(), true) {
           Ok(n) => n,
           Err(e) => {
-            eprintln!(
-              "warning: unknown UID {:?} for /etc/{relative_str}: {e}",
+            warn!(
+              "unknown UID {:?} for /etc/{relative_str}: {e}",
               uid_str.trim()
             );
             continue;
@@ -272,8 +259,8 @@ fn build_etc_manifest(
         let gid: u32 = match resolve_id(gid_str.trim(), false) {
           Ok(n) => n,
           Err(e) => {
-            eprintln!(
-              "warning: unknown GID {:?} for /etc/{relative_str}: {e}",
+            warn!(
+              "unknown GID {:?} for /etc/{relative_str}: {e}",
               gid_str.trim()
             );
             continue;
@@ -287,10 +274,7 @@ fn build_etc_manifest(
         let real_source = match fs::canonicalize(etc_static.join(relative)) {
           Ok(p) => p,
           Err(e) => {
-            eprintln!(
-              "warning: failed to canonicalize source for \
-               /etc/{relative_str}: {e}"
-            );
+            warn!("failed to canonicalize source for /etc/{relative_str}: {e}");
             continue;
           },
         };
@@ -329,10 +313,7 @@ fn build_etc_manifest(
     } else if current.is_dir() {
       // Directory: ensure it exists in /etc and descend into it.
       if let Err(e) = fs::create_dir_all(&target) {
-        eprintln!(
-          "warning: failed to create directory {}: {e}",
-          target.display()
-        );
+        warn!("failed to create directory {}: {e}", target.display());
         continue;
       }
       match read_dir_sorted(&current) {
@@ -343,10 +324,7 @@ fn build_etc_manifest(
           }
         },
         Err(e) => {
-          eprintln!(
-            "warning: failed to read directory {}: {e}",
-            current.display()
-          );
+          warn!("failed to read directory {}: {e}", current.display());
         },
       }
     }
@@ -396,8 +374,8 @@ fn migrate_perl_clean_file(
     if let Err(e) = fs::remove_file(&target)
       && e.kind() != std::io::ErrorKind::NotFound
     {
-      eprintln!(
-        "warning: failed to remove legacy Perl-era file {}: {e}",
+      warn!(
+        "failed to remove legacy Perl-era file {}: {e}",
         target.display()
       );
     }
@@ -406,7 +384,7 @@ fn migrate_perl_clean_file(
   if let Err(e) = fs::remove_file(clean_file)
     && e.kind() != std::io::ErrorKind::NotFound
   {
-    eprintln!("warning: failed to remove {}: {e}", clean_file.display());
+    warn!("failed to remove {}: {e}", clean_file.display());
   }
 }
 
@@ -453,9 +431,9 @@ fn remove_dangling_etc_symlinks(etc_dir: &Path) -> Result<()> {
         .unwrap_or(false);
 
       if !still_present {
-        eprintln!("removing obsolete symlink {}", current.display());
+        info!("removing obsolete symlink {}", current.display());
         if let Err(e) = fs::remove_file(&current) {
-          eprintln!("warning: failed to remove {}: {}", current.display(), e);
+          warn!("failed to remove {}: {}", current.display(), e);
         }
       }
     } else if meta.is_dir() {

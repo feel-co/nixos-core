@@ -700,6 +700,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "log",
  "serde_json",
  "smfh-core",
  "tempfile",
