@@ -2511,6 +2511,9 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to mount essential filesystems")?;
   create_essential_files().context("Failed to create essential files")?;
 
+  set_host_id(config.set_host_id.as_deref())
+    .context("Failed to set host ID")?;
+
   run_hook_script(config.pre_device_commands.as_deref(), "pre-device commands")
     .context("Pre-device commands failed")?;
 
@@ -2688,8 +2691,6 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to copy ISO to RAM")?;
   handle_persistence(&cmdline, &config.target_root, &config.device_manager)
     .context("Failed to handle persistence")?;
-  set_host_id(config.set_host_id.as_deref())
-    .context("Failed to set host ID")?;
 
   config.device_manager.stop();
 
