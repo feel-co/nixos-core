@@ -601,7 +601,11 @@ impl KernelCmdline {
       let value = parts.next().map(String::from);
 
       match key {
-        "root" => cmdline.root = value,
+        "root" => {
+          // Rewrite root=UUID=... and root=LABEL=... (common bootloader
+          // cmdline forms) to the udev-managed /dev/disk/by-* paths.
+          cmdline.root = value.map(rewrite_uuid_label);
+        },
         "init" => cmdline.init = value,
         "console" => {
           if let Some(v) = value {
@@ -645,7 +649,7 @@ impl KernelCmdline {
             value.as_ref().is_none_or(|v| v != "0" && v != "false");
         },
         "boot.persistence" => cmdline.persistence = value,
-        "resume" => cmdline.resume = value,
+        "resume" => cmdline.resume = value.map(rewrite_uuid_label),
         "boot.gfx_mode" => cmdline.boot_gfx_mode = value,
         "quiet" => {
           cmdline.quiet =
@@ -662,6 +666,20 @@ impl KernelCmdline {
 
   fn get(&self, key: &str) -> Option<&String> {
     self.params.get(key).and_then(|v| v.as_ref())
+  }
+}
+
+/// Rewrite `UUID=<hex>` to `/dev/disk/by-uuid/<hex>` and
+/// `LABEL=<name>` to `/dev/disk/by-label/<name>` so the device-wait
+/// loop can canonicalise them through udev symlinks. Unknown
+/// prefixes are returned unchanged.
+fn rewrite_uuid_label(value: String) -> String {
+  if let Some(rest) = value.strip_prefix("UUID=") {
+    format!("/dev/disk/by-uuid/{rest}")
+  } else if let Some(rest) = value.strip_prefix("LABEL=") {
+    format!("/dev/disk/by-label/{rest}")
+  } else {
+    value
   }
 }
 
