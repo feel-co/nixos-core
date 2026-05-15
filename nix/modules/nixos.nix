@@ -6,7 +6,7 @@ self: {
 }: let
   inherit (lib.modules) mkIf mkForce;
   inherit (lib.options) mkOption mkEnableOption mkPackageOption literalExpression;
-  inherit (lib.types) package lines str;
+  inherit (lib.types) package lines str bool;
   inherit (lib.strings) optionalString escapeShellArg concatStringsSep;
   inherit (lib.meta) getExe';
 
@@ -71,25 +71,29 @@ self: {
       ${config.boot.initrd.extraUdevRulesCommands}
 
       for i in "$out"/*.rules; do
+        # XXX: --replace in 'substituteInPlace' has been deprecated and should be
+        # replaced with --replace-fail and the such. Since those paths are not
+        # guaranteed to exist, --replace-warn trades the verbosity of warnings
+        # from --replace with explicit warning messages stating what is missing.
+        # This is the cleanest solution I can think of.
         substituteInPlace "$i" \
-          --replace-fail ata_id ${extra-utils}/bin/ata_id \
-          --replace-fail scsi_id ${extra-utils}/bin/scsi_id \
-          --replace-fail cdrom_id ${extra-utils}/bin/cdrom_id \
-          --replace-fail ${getExe' pkgs.coreutils "basename"} ${extra-utils}/bin/basename \
-          --replace-fail ${getExe' pkgs.util-linux "blkid"} ${extra-utils}/bin/blkid \
-          --replace-fail ${getExe' pkgs.mdadm "mdadm"} ${extra-utils}/sbin \
-          --replace-fail ${getExe' pkgs.bash "sh"} ${extra-utils}/bin/sh \
-          --replace-fail ${lib.getBin pkgs.lvm2}/bin ${extra-utils}/bin \
-          --replace-fail ${udev} ${extra-utils}
+          --replace-warn ata_id ${extra-utils}/bin/ata_id \
+          --replace-warn scsi_id ${extra-utils}/bin/scsi_id \
+          --replace-warn cdrom_id ${extra-utils}/bin/cdrom_id \
+          --replace-warn ${getExe' pkgs.coreutils "basename"} ${extra-utils}/bin/basename \
+          --replace-warn ${getExe' pkgs.util-linux "blkid"} ${extra-utils}/bin/blkid \
+          --replace-warn ${getExe' pkgs.mdadm "mdadm"} ${extra-utils}/sbin \
+          --replace-warn ${getExe' pkgs.bash "sh"} ${extra-utils}/bin/sh \
+          --replace-warn ${lib.getBin pkgs.lvm2}/bin ${extra-utils}/bin \
+          --replace-warn ${udev} ${extra-utils}
       done
 
       substituteInPlace "$out"/60-persistent-storage.rules \
-        --replace-fail ID_CDROM_MEDIA_TRACK_COUNT_DATA ID_CDROM_MEDIA
+        --replace-warn ID_CDROM_MEDIA_TRACK_COUNT_DATA ID_CDROM_MEDIA
     '';
 
   # Use the topologically-sorted list from nixpkgs, not raw attrValues.
   fileSystems = lib.filter fsNeededForBoot config.system.build.fileSystems;
-
   fsInfo = pkgs.writeText "initrd-fsinfo" (lib.concatStringsSep "\n" (lib.concatMap (fs: [
       fs.mountPoint
       (
@@ -279,7 +283,7 @@ in {
     };
 
     strictActivation = mkOption {
-      type = lib.types.bool;
+      type = bool;
       default = false;
       description = ''
         Whether to fail stage 2 when {file}`$systemConfig/activate` is missing,
@@ -395,7 +399,7 @@ in {
 
         package = mkOption {
           type = package;
-          default = "${getExe' cfg.package "init-script-builder"}";
+          default = getExe' cfg.package "init-script-builder";
           defaultText = literalExpression "$${getExe' cfg.package \"init-script-builder\"}";
           description = "The bootloader installer package to use";
         };

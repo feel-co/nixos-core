@@ -58,6 +58,31 @@ in
         };
       };
 
+      recursiveBindMount = {
+        imports = [nixosModule testCommons];
+        system.nixos-core.enable = true;
+        boot = {
+          loader.grub.enable = false;
+          initrd.systemd.enable = false;
+        };
+
+        virtualisation.fileSystems = {
+          "/rbind-src/nested" = {
+            device = "tmpfs";
+            fsType = "tmpfs";
+            options = ["mode=0755"];
+            neededForBoot = true;
+          };
+
+          "/var/rbound" = {
+            device = "/mnt-root/rbind-src";
+            fsType = "none";
+            options = ["rbind"];
+            neededForBoot = true;
+          };
+        };
+      };
+
       loopFileMount = {pkgs, ...}: {
         imports = [nixosModule testCommons];
         system.nixos-core.enable = true;
@@ -140,6 +165,21 @@ in
       with subtest("file bind-mount: no stage1 mount warnings"):
         fileBindMount.fail(
           "journalctl -b --no-pager | grep -F 'Warning: failed to mount'"
+        )
+
+      recursiveBindMount.start()
+      recursiveBindMount.wait_for_unit("multi-user.target")
+
+      with subtest("recursive bind-mount: child mount is preserved"):
+        recursiveBindMount.succeed("mountpoint -q /var/rbound/nested")
+        fstype = recursiveBindMount.succeed(
+          "findmnt -n -o FSTYPE /var/rbound/nested"
+        ).strip()
+        assert fstype == "tmpfs", f"expected nested tmpfs, got {fstype!r}"
+
+      with subtest("recursive bind-mount: no stage1 mount warnings"):
+        recursiveBindMount.fail(
+          "journalctl -b --no-pager | grep -F 'Warning: failed to mount /var/rbound'"
         )
 
       loopFileMount.start()

@@ -24,10 +24,10 @@ use nix::{
 
 const LO_FLAGS_READ_ONLY: u32 = 1;
 const LO_FLAGS_AUTOCLEAR: u32 = 4;
-const LOOP_SET_FD: libc::c_ulong = 0x4C00;
-const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
-const LOOP_SET_STATUS64: libc::c_ulong = 0x4C04;
-const LOOP_CTL_GET_FREE: libc::c_ulong = 0x4C82;
+const LOOP_SET_FD: libc::Ioctl = 0x4C00;
+const LOOP_CLR_FD: libc::Ioctl = 0x4C01;
+const LOOP_SET_STATUS64: libc::Ioctl = 0x4C04;
+const LOOP_CTL_GET_FREE: libc::Ioctl = 0x4C82;
 const LO_NAME_SIZE: usize = 64;
 const LO_KEY_SIZE: usize = 32;
 
@@ -382,6 +382,10 @@ impl<'a> Mount<'a> {
         .any(|opt| opt == "bind" || opt == "rbind")
   }
 
+  fn is_recursive_bind_mount(&self) -> bool {
+    self.options.raw.iter().any(|opt| opt == "rbind")
+  }
+
   fn apply_filesystem(&self, dm: &DeviceManager) -> Result<()> {
     if self.is_bind_mount() {
       self.mount_bind().with_context(|| {
@@ -482,11 +486,17 @@ impl<'a> Mount<'a> {
   }
 
   fn mount_bind(&self) -> Result<()> {
+    let flags = if self.is_recursive_bind_mount() {
+      MsFlags::MS_BIND | MsFlags::MS_REC
+    } else {
+      MsFlags::MS_BIND
+    };
+
     mount(
       Some(self.source),
       self.target,
       None::<&str>,
-      MsFlags::MS_BIND,
+      flags,
       None::<&str>,
     )
     .map_err(Into::into)
@@ -2462,6 +2472,7 @@ fn parse_mount_options<'a>(
       "strictatime" => flags |= MsFlags::MS_STRICTATIME,
       "lazytime" => flags |= MsFlags::MS_LAZYTIME,
       "bind" => flags |= MsFlags::MS_BIND,
+      "rbind" => flags |= MsFlags::MS_BIND | MsFlags::MS_REC,
       "remount" => flags |= MsFlags::MS_REMOUNT,
       "silent" => flags |= MsFlags::MS_SILENT,
       "dirsync" => flags |= MsFlags::MS_DIRSYNC,

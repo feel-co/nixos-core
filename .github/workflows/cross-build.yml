@@ -1,0 +1,22 @@
+name: Cross Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  musl:
+    name: musl cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: cachix/install-nix-action@v31
+      - name: Build nixos-core-musl
+        run: nix build .#nixos-core-musl -L
+      - name: Verify binary is musl-linked
+        run: |
+          file result/bin/nixos-core
+          # Dynamic musl binaries use an ld-musl interpreter.
+          file result/bin/nixos-core | grep -q ld-musl

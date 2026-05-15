@@ -28,23 +28,46 @@ fn main() -> Result<()> {
 
 fn init_logger() {
   use log::Level;
-  let level = env::var("LOG_LEVEL")
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(log::LevelFilter::Info);
 
-  env_logger::Builder::new()
-    .filter_level(level)
-    .format(|buf, record| {
-      let prefix = match record.level() {
-        Level::Error => "<3>",
-        Level::Warn => "<4>",
-        Level::Info => "<6>",
-        Level::Debug | Level::Trace => "<7>",
-      };
-      writeln!(buf, "{}{}", prefix, record.args())
-    })
-    .init();
+  // If the user sets RUST_LOG they get full control. Otherwise we default
+  // every crate to Warn and whitelist only our own workspace crates to Info.
+  // This avoids spam from overly-chatty upstream dependencies (smfh-core logs
+  // every symlink and rename at info!) without hard-coding their names.
+  let mut builder = env_logger::Builder::new();
+  if let Ok(rust_log) = env::var("RUST_LOG") {
+    builder.parse_filters(&rust_log);
+  } else {
+    let level = env::var("LOG_LEVEL")
+      .ok()
+      .and_then(|s| s.parse().ok())
+      .unwrap_or(log::LevelFilter::Info);
+
+    // Default: suppress external-crate noise.
+    builder.filter(None, log::LevelFilter::Warn);
+    // Whitelist our own crates so useful lifecycle logs still show.
+    for crate_name in [
+      "nixos_core",
+      "setup_etc",
+      "stage1",
+      "stage2",
+      "update_users_groups",
+      "init_script",
+      "activation_common",
+    ] {
+      builder.filter(Some(crate_name), level);
+    }
+  }
+
+  builder.format(|buf, record| {
+    let prefix = match record.level() {
+      Level::Error => "<3>",
+      Level::Warn => "<4>",
+      Level::Info => "<6>",
+      Level::Debug | Level::Trace => "<7>",
+    };
+    writeln!(buf, "{}{}", prefix, record.args())
+  });
+  builder.init();
 }
 
 fn dispatch(command: &str, args: &[String]) -> Result<()> {
