@@ -6,7 +6,7 @@ self: {
 }: let
   inherit (lib.modules) mkIf mkForce;
   inherit (lib.options) mkOption mkEnableOption mkPackageOption literalExpression;
-  inherit (lib.types) package lines str;
+  inherit (lib.types) package lines str bool;
   inherit (lib.strings) optionalString escapeShellArg concatStringsSep;
   inherit (lib.meta) getExe';
 
@@ -283,7 +283,7 @@ in {
     };
 
     strictActivation = mkOption {
-      type = lib.types.bool;
+      type = bool;
       default = false;
       description = ''
         Whether to fail stage 2 when {file}`$systemConfig/activate` is missing,
