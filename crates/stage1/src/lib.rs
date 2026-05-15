@@ -611,7 +611,11 @@ impl KernelCmdline {
       let value = parts.next().map(String::from);
 
       match key {
-        "root" => cmdline.root = value,
+        "root" => {
+          // Rewrite root=UUID=... and root=LABEL=... (common bootloader
+          // cmdline forms) to the udev-managed /dev/disk/by-* paths.
+          cmdline.root = value.map(rewrite_uuid_label);
+        },
         "init" => cmdline.init = value,
         "console" => {
           if let Some(v) = value {
@@ -655,7 +659,7 @@ impl KernelCmdline {
             value.as_ref().is_none_or(|v| v != "0" && v != "false");
         },
         "boot.persistence" => cmdline.persistence = value,
-        "resume" => cmdline.resume = value,
+        "resume" => cmdline.resume = value.map(rewrite_uuid_label),
         "boot.gfx_mode" => cmdline.boot_gfx_mode = value,
         "quiet" => {
           cmdline.quiet =
@@ -672,6 +676,20 @@ impl KernelCmdline {
 
   fn get(&self, key: &str) -> Option<&String> {
     self.params.get(key).and_then(|v| v.as_ref())
+  }
+}
+
+/// Rewrite `UUID=<hex>` to `/dev/disk/by-uuid/<hex>` and
+/// `LABEL=<name>` to `/dev/disk/by-label/<name>` so the device-wait
+/// loop can canonicalise them through udev symlinks. Unknown
+/// prefixes are returned unchanged.
+fn rewrite_uuid_label(value: String) -> String {
+  if let Some(rest) = value.strip_prefix("UUID=") {
+    format!("/dev/disk/by-uuid/{rest}")
+  } else if let Some(rest) = value.strip_prefix("LABEL=") {
+    format!("/dev/disk/by-label/{rest}")
+  } else {
+    value
   }
 }
 
@@ -757,7 +775,7 @@ fn setup_environment(extra_utils: Option<&Path>) -> Result<()> {
   }
 
   // Export LD_LIBRARY_PATH so extraUtils binaries find their bundled libs.
-  // Matches stage-1-init.sh:14, `export LD_LIBRARY_PATH=@extraUtils@/lib`,
+  // Matches `export LD_LIBRARY_PATH=@extraUtils@/lib` from stage-1-init.sh
   // which is load-bearing for cryptsetup/lvm/mdadm/btrfs-progs builds that
   // the initrd ships with non-standard rpath-less linkage.
   if let Some(utils) = extra_utils {
@@ -971,6 +989,19 @@ fn is_mounted(path: &Path) -> bool {
   false
 }
 
+fn is_device_mounted(device: &str) -> bool {
+  if let Ok(file) = File::open("/proc/mounts") {
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+      let parts: Vec<&str> = line.split_whitespace().collect();
+      if parts.len() >= 2 && parts[0] == device {
+        return true;
+      }
+    }
+  }
+  false
+}
+
 // Wait up to timeout_secs for device to appear; re-triggers the device manager
 // periodically.
 fn wait_for_device(
@@ -1055,10 +1086,10 @@ fn activate_lvm() -> Result<()> {
   log_message("Activating LVM volumes...", true);
 
   // extraUtils ships `lvm` (the multicall binary from lvm2) but not a
-  // standalone `vgchange`, matching stage-1.nix:122-124 which only copies
+  // standalone `vgchange`, matching stage-1.nix which only copies
   // dmsetup + lvm. Invoking `vgchange` directly therefore fails on the
   // standard initrd; we must go through the multicall entry point just
-  // like `lvm vgchange -ay` in stage-1-init.sh:289.
+  // like `lvm vgchange -ay` in stage-1-init.sh.
   let status = Command::new("lvm").args(["vgchange", "-ay"]).status();
 
   match status {
@@ -1245,6 +1276,13 @@ fn needs_fsck(fstype: &str, check_journaling: bool) -> bool {
 }
 
 fn run_fsck(device: &str, fstype: &str, _options: &[String]) -> Result<bool> {
+  // Device might be already mounted manually, e.g. NBD-device or the host
+  // filesystem of the file which contains encrypted root fs.
+  if is_device_mounted(device) {
+    log_message(&format!("skip checking already mounted {device}"), true);
+    return Ok(true);
+  }
+
   log_message(&format!("Checking {fstype} filesystem on {device}"), true);
 
   // Skip non-block devices. Matches bash `[ ! -b "$device" ] && continue`:
@@ -1605,13 +1643,25 @@ fn mount_root(
     .or(fsinfo_fstype)
     .unwrap_or_else(|| "auto".to_string());
 
-  // Parse mount options
+  // Build mount options: rootflags= from the cmdline (an operator override the
+  // shell does not support), then merge options from the fsInfo record for /.
+  // Exact-duplicate options are skipped; for same-key conflicts (e.g. two
+  // subvol= entries) the kernel uses the last one, which is the fsInfo value.
+  // The bcachefs path above applies the same merge.
   let mut mount_opts: Vec<String> = cmdline
     .get("rootflags")
     .map(|s| s.split(',').map(String::from).collect())
     .unwrap_or_default();
 
-  // Default to rw if not specified
+  if let Some(e) = fsinfo_root {
+    for opt in &e.options {
+      if !mount_opts.contains(opt) {
+        mount_opts.push(opt.clone());
+      }
+    }
+  }
+
+  // Default to rw if neither ro nor rw was supplied by cmdline or fsInfo.
   if !mount_opts.iter().any(|o| o == "ro" || o == "rw") {
     mount_opts.push("rw".to_string());
   }
@@ -1914,53 +1964,84 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
   Ok(())
 }
 
-fn copy_initrd_secrets(target_root: &Path) -> Result<()> {
-  let secrets_dir = Path::new("/secrets");
+fn copy_initrd_secrets(extra_utils: Option<&Path>) -> Result<()> {
+  if let Some(utils) = extra_utils {
+    let extra_secrets = utils.join("secrets");
+    if extra_secrets.is_dir() {
+      log_message("Linking extraUtils secrets...", true);
+      for entry in fs::read_dir(&extra_secrets)? {
+        let entry = entry?;
+        let source = entry.path();
+        let rel = source.strip_prefix(&extra_secrets)?;
+        let dest = Path::new("/").join(rel);
+        if let Some(parent) = dest.parent() {
+          fs::create_dir_all(parent)?;
+        }
 
-  if !secrets_dir.exists() {
-    return Ok(());
+        // Symlink into the initrd namespace so tools running during stage 1
+        // (cryptsetup, network helpers, etc.) find them at the
+        // expected absolute paths.
+        if source.is_dir() {
+          symlink_dir_recurse(&source, &dest)?;
+        } else {
+          symlink(&source, &dest).with_context(|| {
+            format!("Failed to symlink {source:?} to {dest:?}")
+          })?;
+        }
+      }
+    }
   }
 
-  log_message("Copying initrd secrets...", true);
-
-  for entry in fs::read_dir(secrets_dir)? {
-    let entry = entry?;
-    let source = entry.path();
-
-    // Get relative path and construct destination
-    let rel_path = source.strip_prefix(secrets_dir)?;
-    let dest = target_root.join(rel_path);
-
-    let file_type = entry.file_type()?;
-    if file_type.is_dir() {
-      // Recursively copy the directory tree.
-      copy_dir_recursive(&source, &dest).with_context(|| {
-        format!("Failed to copy secret directory {source:?} to {dest:?}")
-      })?;
-    } else {
-      // Create parent directory with restricted permissions and copy the file.
+  let initrd_secrets = Path::new("/.initrd-secrets");
+  if initrd_secrets.is_dir() {
+    log_message("Copying /.initrd-secrets...", true);
+    for entry in fs::read_dir(initrd_secrets)? {
+      let entry = entry?;
+      let source = entry.path();
+      let rel = source.strip_prefix(initrd_secrets)?;
+      let dest = Path::new("/").join(rel);
       if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
-        // Secret parent directories must not be world-readable.
-        fs::set_permissions(parent, Permissions::from_mode(0o700))?;
       }
-      fs::copy(&source, &dest).with_context(|| {
-        format!("Failed to copy secret from {source:?} to {dest:?}")
-      })?;
 
-      // Set secure permissions on copied file.
-      let mut perms = fs::metadata(&dest)?.permissions();
-      perms.set_mode(0o600);
-      fs::set_permissions(&dest, perms)?;
+      let meta = entry.metadata()?;
+      if meta.is_dir() {
+        copy_dir_recursive(&source, &dest)?;
+      } else {
+        fs::copy(&source, &dest)
+          .with_context(|| format!("Failed to copy {source:?} to {dest:?}"))?;
+        // Secret files in the initrd must not be world-readable.
+        fs::set_permissions(&dest, Permissions::from_mode(0o600))?;
+      }
     }
   }
 
   Ok(())
 }
 
+/// Symlink an entire directory tree, mirroring the structure of `src` under
+/// `dest`.  Directories become real directories (not symlinks) so their
+/// contents are reachable through the filesystem.
+fn symlink_dir_recurse(src: &Path, dest: &Path) -> Result<()> {
+  fs::create_dir_all(dest)?;
+  for entry in fs::read_dir(src)? {
+    let entry = entry?;
+    let child_src = entry.path();
+    let child_dest = dest.join(entry.file_name());
+    if child_src.is_dir() {
+      symlink_dir_recurse(&child_src, &child_dest)?;
+    } else {
+      symlink(&child_src, &child_dest).with_context(|| {
+        format!("Failed to symlink {child_src:?} to {child_dest:?}")
+      })?;
+    }
+  }
+  Ok(())
+}
+
 /// Emit a udev rule mapping the real root device to /dev/root so systemd's
-/// mount-unit generator can find it. Matches stage-1-init.sh:615-624, which
-/// does the equivalent via `udevadm info --device-id-of-file`.
+/// mount-unit generator can find it. stage-1-init.sh does the equivalent via
+/// `udevadm info --device-id-of-file`.
 fn write_dev_root_udev_rule(target_root: &Path) -> Result<()> {
   // Prefer the iso file if this is a livecd boot, as the shell does; fall back
   // to stat'ing target_root itself so bind-mounted / overlay roots still work.
@@ -2023,7 +2104,8 @@ fn kill_remaining_processes() -> Result<()> {
 
   // Signal all processes except ourselves and storage daemons to terminate
   // Storage daemons are distinguished by an @ in front of their command line:
-  // https://www.freedesktop.org/wiki/Software/systemd/RootStorageDaemons/
+  // See:
+  //  <https://www.freedesktop.org/wiki/Software/systemd/RootStorageDaemons>
   let my_pid = getpid().as_raw();
 
   // First try SIGTERM
@@ -2452,11 +2534,16 @@ pub fn run(args: &[String]) -> Result<()> {
 
   setup_environment(config.extra_utils.as_deref())
     .context("Failed to set up environment")?;
+  copy_initrd_secrets(config.extra_utils.as_deref())
+    .context("Failed to copy initrd secrets")?;
   create_directories().context("Failed to create directories")?;
   create_essential_devices().context("Failed to create essential devices")?;
   mount_essential_filesystems()
     .context("Failed to mount essential filesystems")?;
   create_essential_files().context("Failed to create essential files")?;
+
+  set_host_id(config.set_host_id.as_deref())
+    .context("Failed to set host ID")?;
 
   run_hook_script(config.pre_device_commands.as_deref(), "pre-device commands")
     .context("Pre-device commands failed")?;
@@ -2491,7 +2578,8 @@ pub fn run(args: &[String]) -> Result<()> {
   activate_lvm().context("Failed to activate LVM")?;
 
   // Operator-triggered checkpoint: drop into the recovery shell after devices
-  // are assembled but before anything is mounted. Matches stage-1-init.sh:291.
+  // are assembled but before anything is mounted. This is consistent with the
+  // upstream stage1 script.
   if cmdline.debug1devices {
     fail("boot.debug1devices checkpoint reached", &cmdline, &config);
   }
@@ -2542,6 +2630,9 @@ pub fn run(args: &[String]) -> Result<()> {
   handle_lustrate(&config.target_root).context("Failed to handle lustrate")?;
 
   for fs_info in &fs_infos {
+    if fs_info.mountpoint == Path::new("/") {
+      continue;
+    }
     if needs_fsck(&fs_info.fstype, config.check_journaling_fs)
       && let Err(e) =
         run_fsck(&fs_info.device, &fs_info.fstype, &fs_info.options)
@@ -2634,16 +2725,12 @@ pub fn run(args: &[String]) -> Result<()> {
     .context("Failed to copy ISO to RAM")?;
   handle_persistence(&cmdline, &config.target_root, &config.device_manager)
     .context("Failed to handle persistence")?;
-  copy_initrd_secrets(&config.target_root)
-    .context("Failed to copy initrd secrets")?;
-  set_host_id(config.set_host_id.as_deref())
-    .context("Failed to set host ID")?;
 
   config.device_manager.stop();
 
   kill_remaining_processes().context("Failed to kill remaining processes")?;
 
-  // Post-kill-processes checkpoint (stage-1-init.sh:649). Deliberately after
+  // Post-kill-processes checkpoint. Deliberately after
   // udevd is gone so the recovery shell is the only thing still running.
   if cmdline.debug1mounts {
     fail("boot.debug1mounts checkpoint reached", &cmdline, &config);
